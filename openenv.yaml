@@ -1,0 +1,85 @@
+name: aml-compliance-env
+version: "1.0.0"
+description: >
+  Anti-Money Laundering Compliance Officer Environment.
+  The agent acts as a bank compliance officer triaging flagged transactions.
+  It must decide whether to block, investigate, or clear each transaction
+  based on AML risk signals including structuring, sanctions exposure,
+  shell company involvement, network patterns, and PEP status.
+author: shiva13-ai
+tags:
+  - openenv
+  - aml
+  - compliance
+  - finance
+  - real-world
+  - multi-task
+
+tasks:
+  - name: triage_basic
+    difficulty: easy
+    description: "5 transactions with clear single-signal AML indicators"
+    n_transactions: 5
+    investigation_budget: 2
+
+  - name: triage_network
+    difficulty: medium
+    description: "10 transactions forming a structuring/layering network"
+    n_transactions: 10
+    investigation_budget: 3
+
+  - name: triage_adversarial
+    difficulty: hard
+    description: "15 adversarially-crafted transactions with hidden patterns"
+    n_transactions: 15
+    investigation_budget: 4
+
+action_space:
+  type: object
+  description: >
+    AMLAction containing a list of TransactionDecision objects.
+    Each decision maps a transaction_id to one of: block | investigate | clear.
+  schema:
+    decisions:
+      type: array
+      items:
+        transaction_id: string
+        decision: enum[block, investigate, clear]
+        reasoning: string (optional)
+
+observation_space:
+  type: object
+  description: >
+    AMLObservation containing the list of flagged transactions with
+    15 risk features each, plus task context and investigation budget.
+  features:
+    - amount (float, USD)
+    - sender_country / receiver_country (ISO-2)
+    - transaction_type (wire/cash/crypto/internal)
+    - velocity_24h (int)
+    - is_round_number (bool)
+    - prior_flags (int)
+    - amount_vs_avg_ratio (float)
+    - high_risk_country (bool)
+    - structuring_indicator (bool)
+    - shell_company_indicator (bool)
+    - pep_involved (bool)
+    - notes (free text)
+
+reward:
+  range: [0.0, 1.0]
+  type: float
+  description: >
+    Normalized compliance score. Rewards correct blocks (+3), correct
+    investigates (+2), correct clears (+1). Penalizes false negatives (-2),
+    false positives (-1), and exceeding investigation budget (-0.5/over).
+    Includes a small reasoning bonus (+0.02/txn, capped at 0.1).
+
+endpoints:
+  reset: POST /reset
+  step: POST /step
+  state: GET /state
+  health: GET /health
+  tasks: GET /tasks
+
+port: 7860
