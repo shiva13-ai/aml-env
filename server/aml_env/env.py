@@ -196,8 +196,7 @@ class AMLEnv:
 
         # Normalize to [0, 1]
         normalized = raw_score / max_score
-        normalized = max(0.0, min(1.0, normalized + reasoning_bonus))
-
+        normalized = max(0.001, min(0.999, normalized + reasoning_bonus))
         info = {
             "true_positives": true_positives,
             "false_positives": false_positives,
