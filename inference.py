@@ -30,12 +30,12 @@ API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1"
 MODEL_NAME: str = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 ENV_BASE_URL: str = os.getenv("ENV_BASE_URL", "http://localhost:7860")
 BENCHMARK: str = "aml-compliance-env"
-MAX_STEPS: int = 1          # Single-step episode (batch triage)
-TEMPERATURE: float = 0.2    # Low temp for deterministic compliance decisions
-MAX_TOKENS: int = 1500
+MAX_STEPS: int = 1
+TEMPERATURE: float = 0.2
+MAX_TOKENS: int = 2000
 SUCCESS_SCORE_THRESHOLD: float = 0.5
 
-TASKS = ["triage_basic", "triage_network", "triage_adversarial"]
+TASKS = ["triage_basic", "triage_network", "triage_adversarial", "correspondent_banking"]
 
 # ── Logging helpers ────────────────────────────────────────────────────────────
 
@@ -45,7 +45,6 @@ def log_start(task: str, env: str, model: str) -> None:
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
     error_val = error if error else "null"
     done_val = str(done).lower()
-    # Keep action compact for the log line
     action_compact = action.replace("\n", " ")[:200]
     print(
         f"[STEP] step={step} action={action_compact} reward={reward:.2f} done={done_val} error={error_val}",
@@ -62,30 +61,38 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 # ── Prompt builder ─────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = textwrap.dedent("""
-You are an expert AML (Anti-Money Laundering) Compliance Officer at a major bank.
+You are an expert AML (Anti-Money Laundering) Compliance Officer at a major international bank.
 You will receive a batch of flagged transactions and must classify each one as:
-  - "block": Immediately freeze funds. Use for clear sanctions violations, known bad actors, crypto mixers, shell company integration.
-  - "investigate": Flag for deeper manual review. Use for suspicious patterns needing more info (structuring, unusual amounts, PEP involvement).
-  - "clear": Mark as legitimate. Use only when you are confident the transaction is normal.
+  - "block": Immediately freeze funds. Use for clear sanctions violations, known bad actors,
+             crypto mixers, shell company integration, hawala round-trips, nested correspondents
+             with no AML program, TBML, and state-owned enterprise sanctions evasion.
+  - "investigate": Flag for deeper manual review. Use for suspicious patterns needing
+                   more information: structuring, unusual amounts, PEP involvement,
+                   payable-through account concerns, sanctions-adjacent routes.
+  - "clear": Mark as legitimate. Use when you are confident the transaction is normal
+             (payroll, documented trade finance, treasury operations, pension disbursements).
 
-You must respond with a valid JSON object ONLY — no markdown, no explanation outside the JSON.
+You must respond with a valid JSON object ONLY — no markdown, no explanation outside JSON.
 Format:
 {
   "decisions": [
-    {"transaction_id": "TXN001", "decision": "block", "reasoning": "...brief reason..."},
+    {"transaction_id": "TXN001", "decision": "block", "reasoning": "...specific reason citing risk signals..."},
     ...
   ]
 }
 
-Key AML signals to watch for:
-- Structuring: multiple transactions just below $10,000 reporting threshold
-- High-risk countries: IR (Iran), KP (North Korea), YE (Yemen), SY (Syria), MM (Myanmar)
-- Shell companies: shell_company_indicator=true
-- PEP: Politically Exposed Person — elevated scrutiny required
-- amount_vs_avg_ratio > 5x: highly unusual vs account history
-- Crypto transactions from mixer addresses
-- Round numbers + high velocity = suspicious
-- Network patterns: same sender/receiver appearing in multiple transactions
+Key AML typologies to detect:
+STRUCTURING: Multiple transactions just below $10,000 reporting threshold from same sender
+SANCTIONS: IR=Iran, KP=North Korea, YE=Yemen, SY=Syria, MM=Myanmar, AF=Afghanistan
+SHELL COMPANIES: shell_company_indicator=true — especially with PEP + offshore jurisdiction
+LAYERING NETWORKS: Same account appears as sender/receiver in multiple transactions
+CORRESPONDENT BANKING: Payable-through accounts, nested correspondents, hawala round-trips
+TRADE-BASED ML (TBML): Over/under-invoiced goods, art/cultural goods with inflated values
+CRYPTO: Mixer outputs, unregistered VASPs feeding correspondent accounts
+PEP: Politically Exposed Person — amounts inconsistent with known salary/role
+REAL ESTATE: Anonymous LLC all-cash purchases with no beneficial owner disclosure
+FALSE POSITIVES TO AVOID: Payroll, documented LC settlements, nostro reconciliation,
+                          World Bank/MDB disbursements, regulated escrow, FX settlements
 """).strip()
 
 
@@ -102,19 +109,21 @@ def build_user_prompt(observation: Dict[str, Any]) -> str:
         lines.append(
             f"\nID: {t['id']}"
             f"\n  Amount: ${t['amount']:,.2f}"
-            f"\n  Sender: {t['sender_id']} ({t['sender_country']}) → Receiver: {t['receiver_id']} ({t['receiver_country']})"
+            f"\n  Sender: {t['sender_id']} ({t['sender_country']}) → "
+            f"Receiver: {t['receiver_id']} ({t['receiver_country']})"
             f"\n  Type: {t['transaction_type']} | Velocity(24h): {t['velocity_24h']}"
             f"\n  Round Number: {t['is_round_number']} | Prior Flags: {t['prior_flags']}"
-            f"\n  Amount vs Avg: {t['amount_vs_avg_ratio']:.1f}x | High-Risk Country: {t['high_risk_country']}"
-            f"\n  Structuring: {t['structuring_indicator']} | Shell Company: {t['shell_company_indicator']} | PEP: {t['pep_involved']}"
+            f"\n  Amount vs Avg: {t['amount_vs_avg_ratio']:.1f}x | "
+            f"High-Risk Country: {t['high_risk_country']}"
+            f"\n  Structuring: {t['structuring_indicator']} | "
+            f"Shell Company: {t['shell_company_indicator']} | PEP: {t['pep_involved']}"
             f"\n  Notes: {t['notes']}"
         )
-    lines.append("\nProvide your decisions as JSON only.")
+    lines.append("\nProvide your decisions as JSON only. Include reasoning for every decision.")
     return "\n".join(lines)
 
 
 def get_model_decisions(client: OpenAI, observation: Dict[str, Any]) -> tuple[str, Optional[str]]:
-    """Call LLM and parse JSON decisions. Returns (raw_action_str, error_or_None)."""
     user_prompt = build_user_prompt(observation)
     try:
         completion = client.chat.completions.create(
@@ -128,21 +137,18 @@ def get_model_decisions(client: OpenAI, observation: Dict[str, Any]) -> tuple[st
             stream=False,
         )
         raw = (completion.choices[0].message.content or "").strip()
-        # Strip markdown fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
         return raw.strip(), None
     except Exception as exc:
-        return "{\"decisions\":[]}", str(exc)
+        return '{"decisions":[]}', str(exc)
 
 
 def parse_decisions(raw: str, txn_ids: List[str]) -> tuple[Dict[str, Any], Optional[str]]:
-    """Parse LLM JSON output into AMLAction-compatible dict."""
     try:
         data = json.loads(raw)
-        # Validate all txn_ids are covered; default missing ones to "clear"
         covered = {d["transaction_id"] for d in data.get("decisions", [])}
         for tid in txn_ids:
             if tid not in covered:
@@ -153,15 +159,16 @@ def parse_decisions(raw: str, txn_ids: List[str]) -> tuple[Dict[str, Any], Optio
                 })
         return data, None
     except json.JSONDecodeError as e:
-        # Fallback: clear everything
-        fallback = {"decisions": [{"transaction_id": tid, "decision": "clear", "reasoning": "parse error"} for tid in txn_ids]}
+        fallback = {
+            "decisions": [
+                {"transaction_id": tid, "decision": "clear", "reasoning": "parse error"}
+                for tid in txn_ids
+            ]
+        }
         return fallback, f"JSON parse error: {e}"
 
 
-# ── Main episode runner ────────────────────────────────────────────────────────
-
 async def run_episode(task_name: str, client: OpenAI) -> float:
-    """Run one episode for a given task. Returns score in [0,1]."""
     rewards: List[float] = []
     steps_taken = 0
     score = 0.0
@@ -170,16 +177,14 @@ async def run_episode(task_name: str, client: OpenAI) -> float:
 
     log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
-    async with httpx.AsyncClient(base_url=ENV_BASE_URL, timeout=60.0) as http:
+    async with httpx.AsyncClient(base_url=ENV_BASE_URL, timeout=120.0) as http:
         try:
-            # 1. Reset
             r = await http.post("/reset", json={"task_name": task_name})
             r.raise_for_status()
             result = r.json()
             obs = result["observation"]
             txn_ids = [t["id"] for t in obs["transactions"]]
 
-            # 2. Single step: get LLM decisions
             for step in range(1, MAX_STEPS + 1):
                 if result.get("done", False):
                     break
@@ -188,7 +193,6 @@ async def run_episode(task_name: str, client: OpenAI) -> float:
                 action_data, parse_error = parse_decisions(raw_action, txn_ids)
                 error_msg = llm_error or parse_error
 
-                # 3. Step
                 r = await http.post(
                     "/step",
                     json=action_data,
@@ -228,7 +232,6 @@ async def run_episode(task_name: str, client: OpenAI) -> float:
 
 async def main() -> None:
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
     all_scores = []
     for task in TASKS:
         score = await run_episode(task_name=task, client=client)

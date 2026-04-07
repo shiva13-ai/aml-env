@@ -1,11 +1,14 @@
 name: aml-compliance-env
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Anti-Money Laundering Compliance Officer Environment.
   The agent acts as a bank compliance officer triaging flagged transactions.
   It must decide whether to block, investigate, or clear each transaction
-  based on AML risk signals including structuring, sanctions exposure,
-  shell company involvement, network patterns, and PEP status.
+  based on AML risk signals: structuring, sanctions exposure, shell company
+  involvement, network layering patterns, PEP status, and correspondent
+  banking typologies. Covers 4 tasks from basic triage to expert-level
+  correspondent banking de-risking decisions — a genuine daily workflow
+  at major financial institutions worldwide.
 author: shiva13-ai
 tags:
   - openenv
@@ -14,6 +17,7 @@ tags:
   - finance
   - real-world
   - multi-task
+  - correspondent-banking
 
 tasks:
   - name: triage_basic
@@ -34,6 +38,16 @@ tasks:
     n_transactions: 15
     investigation_budget: 4
 
+  - name: correspondent_banking
+    difficulty: expert
+    description: >
+      20 transactions through nested correspondent banking relationships
+      across 3 respondent banks. Requires identifying payable-through
+      account abuse, nested correspondents, TBML via cultural goods,
+      hawala round-trips, and sanctions evasion via SOEs.
+    n_transactions: 20
+    investigation_budget: 5
+
 action_space:
   type: object
   description: >
@@ -45,7 +59,7 @@ action_space:
       items:
         transaction_id: string
         decision: enum[block, investigate, clear]
-        reasoning: string (optional)
+        reasoning: string (optional, earns bonus reward)
 
 observation_space:
   type: object
@@ -64,16 +78,18 @@ observation_space:
     - structuring_indicator (bool)
     - shell_company_indicator (bool)
     - pep_involved (bool)
-    - notes (free text)
+    - notes (free text analyst context)
 
 reward:
-  range: [0.0, 1.0]
+  range: (0.001, 0.999)
   type: float
   description: >
-    Normalized compliance score. Rewards correct blocks (+3), correct
-    investigates (+2), correct clears (+1). Penalizes false negatives (-2),
-    false positives (-1), and exceeding investigation budget (-0.5/over).
-    Includes a small reasoning bonus (+0.02/txn, capped at 0.1).
+    Shaped compliance score with partial-progress signal.
+    Correct block: +4, correct investigate: +3, correct clear: +1.
+    Partial credit: investigate on block-labeled: +2.
+    Penalties: false negative: -3, false positive: -1, over-budget: -1/each.
+    Reasoning bonus: +0.03 per suspicious txn with quality reasoning (cap 0.12).
+    Score is strictly between 0.001 and 0.999 (never 0 or 1).
 
 endpoints:
   reset: POST /reset
