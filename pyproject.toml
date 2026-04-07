@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-server = "aml_env.server:app"
+server = "app:main"
 
 [tool.setuptools.packages.find]
 where = ["server"]
