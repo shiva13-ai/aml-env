@@ -13,7 +13,11 @@ dependencies = [
     "pydantic>=2.6.0",
     "httpx>=0.27.0",
     "openai>=1.0.0",
+    "openenv-core>=0.2.0",
 ]
+
+[project.scripts]
+server = "aml_env.server:app"
 
 [tool.setuptools.packages.find]
 where = ["server"]
