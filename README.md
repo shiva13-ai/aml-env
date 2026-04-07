@@ -1,3 +1,17 @@
+---
+title: AML Compliance Officer Environment
+emoji: 🏦
+colorFrom: green
+colorTo: blue
+sdk: docker
+pinned: false
+license: apache-2.0
+tags:
+  - openenv
+  - aml
+  - compliance
+  - finance
+---
 # 🏦 AML Compliance Officer Environment
 
 > **OpenEnv-compatible Anti-Money Laundering environment for training and evaluating AI compliance agents.**
