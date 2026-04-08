@@ -35,7 +35,7 @@ TEMPERATURE: float = 0.2
 MAX_TOKENS: int = 2000
 SUCCESS_SCORE_THRESHOLD: float = 0.5
 
-TASKS = ["triage_basic", "triage_network", "triage_adversarial", "correspondent_banking"]
+TASKS = ["triage_basic", "triage_network", "triage_adversarial", "correspondent_banking", "sanctions_screening", "crypto_defi_aml"]
 
 # ── Logging helpers ────────────────────────────────────────────────────────────
 

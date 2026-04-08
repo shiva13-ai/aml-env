@@ -11,7 +11,7 @@ from .models import (
 )
 from .data import get_task_data
 
-VALID_TASKS = ["triage_basic", "triage_network", "triage_adversarial", "correspondent_banking"]
+VALID_TASKS = ["triage_basic", "triage_network", "triage_adversarial", "correspondent_banking", "sanctions_screening", "crypto_defi_aml"]
 
 
 class AMLEnv:

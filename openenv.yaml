@@ -48,6 +48,26 @@ tasks:
     n_transactions: 20
     investigation_budget: 5
 
+
+  - name: sanctions_screening
+    difficulty: medium-hard
+    description: >
+      12 transactions requiring OFAC SDN / UN / EU sanctions list screening.
+      Includes name disambiguation, general license exceptions, subsidiary
+      liability, and FinCEN advisory matches.
+    n_transactions: 12
+    investigation_budget: 4
+
+  - name: crypto_defi_aml
+    difficulty: expert
+    description: >
+      18 on-chain and off-chain crypto transactions covering DeFi-specific
+      AML typologies: Tornado Cash outputs, Lazarus Group wallets, rug pulls,
+      darknet peel chains, cross-chain bridge hopping, NFT wash trading,
+      ransomware payments, and sanctioned exchange withdrawals.
+    n_transactions: 18
+    investigation_budget: 5
+
 action_space:
   type: object
   description: >

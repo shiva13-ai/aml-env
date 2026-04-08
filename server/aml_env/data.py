@@ -19,6 +19,10 @@ def get_task_data(task_name: str) -> Tuple[List[Transaction], Dict[str, str], st
         return _task_adversarial()
     elif task_name == "correspondent_banking":
         return _task_correspondent()
+    elif task_name == "sanctions_screening":
+        return _task_sanctions()
+    elif task_name == "crypto_defi_aml":
+        return _task_crypto_defi()
     else:
         raise ValueError(f"Unknown task: {task_name}")
 
@@ -578,5 +582,313 @@ def _task_correspondent() -> Tuple[List[Transaction], Dict[str, str], str, int]:
         "CB018": "block",         # new shell NGO
         "CB019": "clear",         # FX settlement
         "CB020": "block",         # Russian SOE sanctions evasion
+    }
+    return txns, ground_truth, instructions, 5
+
+
+# ── TASK 5: Sanctions Screening (Medium-Hard) ─────────────────────────────────
+def _task_sanctions() -> Tuple[List[Transaction], Dict[str, str], str, int]:
+    instructions = (
+        "SANCTIONS SCREENING: You are screening 12 transactions against OFAC SDN list, "
+        "UN Security Council sanctions, and EU consolidated sanctions list. "
+        "Some transactions involve entities that are close to — but not exactly on — the sanctions list "
+        "(name variations, subsidiaries, front companies). "
+        "Decisions: 'block' (sanctions match confirmed), 'investigate' (possible match, needs human review), "
+        "'clear' (no sanctions concern). "
+        "Investigation budget: 4. "
+        "False positives in sanctions screening have serious diplomatic consequences — be precise."
+    )
+    txns = [
+        Transaction(
+            id="SAN001", amount=2_500_000.0, sender_id="ROSNEFT_SUBSIDIARY", receiver_id="TRADING_CO",
+            sender_country="RU", receiver_country="AE",
+            transaction_type="wire", velocity_24h=1, is_round_number=False,
+            prior_flags=3, amount_vs_avg_ratio=1.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=True,
+            notes="Rosneft Trading S.A. — direct subsidiary of OFAC-designated Rosneft. Wire to UAE trading company."
+        ),
+        Transaction(
+            id="SAN002", amount=45_000.0, sender_id="JOHN_SMITH_COMMON", receiver_id="RETAIL_MERCHANT",
+            sender_country="US", receiver_country="US",
+            transaction_type="internal", velocity_24h=1, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=1.1, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="John Smith — common name with 3,400 SDN matches. This individual is a US citizen, DOB 1985, SSN verified."
+        ),
+        Transaction(
+            id="SAN003", amount=180_000.0, sender_id="BANK_MELLI_IRAN", receiver_id="EURO_CORP",
+            sender_country="IR", receiver_country="DE",
+            transaction_type="wire", velocity_24h=1, is_round_number=False,
+            prior_flags=2, amount_vs_avg_ratio=3.5, high_risk_country=True,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Bank Melli Iran — directly on OFAC SDN list since 2007. Payment for 'consulting services'."
+        ),
+        Transaction(
+            id="SAN004", amount=12_000.0, sender_id="CUBA_DIPLOMAT_ACCT", receiver_id="HOTEL_PAYMENT",
+            sender_country="CU", receiver_country="US",
+            transaction_type="wire", velocity_24h=1, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=1.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=True,
+            notes="Cuban diplomatic mission — OFAC general license GL-3 covers Cuban diplomat transactions for official duties."
+        ),
+        Transaction(
+            id="SAN005", amount=890_000.0, sender_id="NOVATEK_GAS", receiver_id="LNG_BUYER",
+            sender_country="RU", receiver_country="JP",
+            transaction_type="wire", velocity_24h=1, is_round_number=False,
+            prior_flags=1, amount_vs_avg_ratio=2.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Novatek — on EU sanctions list but has OFAC wind-down license for LNG energy transactions until Q4."
+        ),
+        Transaction(
+            id="SAN006", amount=320_000.0, sender_id="KIM_CHOL_CO", receiver_id="MACHINERY_IMPORT",
+            sender_country="KP", receiver_country="CN",
+            transaction_type="wire", velocity_24h=1, is_round_number=False,
+            prior_flags=3, amount_vs_avg_ratio=8.0, high_risk_country=True,
+            structuring_indicator=False, shell_company_indicator=True, pep_involved=True,
+            notes="Kim Chol — on UN DPRK sanctions list. Front company purchasing dual-use machinery via China."
+        ),
+        Transaction(
+            id="SAN007", amount=7_500.0, sender_id="HUMANITARIAN_NGO", receiver_id="SYRIA_FIELD_OPS",
+            sender_country="CH", receiver_country="SY",
+            transaction_type="wire", velocity_24h=1, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=1.0, high_risk_country=True,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="ICRC — International Committee of Red Cross. OFAC General License covers humanitarian NGO ops in Syria."
+        ),
+        Transaction(
+            id="SAN008", amount=55_000.0, sender_id="WAGNER_GROUP_SHELL", receiver_id="ARMS_BROKER",
+            sender_country="ZA", receiver_country="LY",
+            transaction_type="wire", velocity_24h=2, is_round_number=False,
+            prior_flags=2, amount_vs_avg_ratio=7.5, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=True, pep_involved=False,
+            notes="South Africa shell co linked to Wagner Group (OFAC-designated). Payment to Libya arms broker."
+        ),
+        Transaction(
+            id="SAN009", amount=3_200.0, sender_id="IRAN_STUDENT_ASSOC", receiver_id="UNIVERSITY_FEE",
+            sender_country="IR", receiver_country="US",
+            transaction_type="wire", velocity_24h=1, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=1.0, high_risk_country=True,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Iranian student — OFAC GL covers tuition payments by Iranian nationals studying in the US."
+        ),
+        Transaction(
+            id="SAN010", amount=4_200_000.0, sender_id="GAZPROM_NEFT", receiver_id="ENERGY_TRADER",
+            sender_country="RU", receiver_country="TR",
+            transaction_type="wire", velocity_24h=1, is_round_number=False,
+            prior_flags=2, amount_vs_avg_ratio=1.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=True,
+            notes="Gazprom Neft — OFAC SDN designated. No active license. Turkey energy trade does not exempt SDN entities."
+        ),
+        Transaction(
+            id="SAN011", amount=28_000.0, sender_id="SIMILAR_NAME_CORP", receiver_id="SUPPLIER_EU",
+            sender_country="AE", receiver_country="FR",
+            transaction_type="wire", velocity_24h=1, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=1.2, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="'Al Quds Trading LLC' — similar name to SDN-listed 'Al Quds Brigades' but different entity. UAE trade reg verified."
+        ),
+        Transaction(
+            id="SAN012", amount=650_000.0, sender_id="HAMAS_FRONT_CHARITY", receiver_id="WEST_BANK_ACCT",
+            sender_country="QA", receiver_country="PS",
+            transaction_type="wire", velocity_24h=3, is_round_number=False,
+            prior_flags=3, amount_vs_avg_ratio=12.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=True, pep_involved=False,
+            notes="Qatar charity — FinCEN advisory links this specific org to Hamas financing. 3 prior SAR filings."
+        ),
+    ]
+    ground_truth = {
+        "SAN001": "block",        # Rosneft subsidiary = designated
+        "SAN002": "clear",        # common name, verified US citizen
+        "SAN003": "block",        # Bank Melli Iran = directly on SDN
+        "SAN004": "clear",        # Cuban diplomat + valid OFAC GL
+        "SAN005": "investigate",  # EU-listed but has wind-down license — needs review
+        "SAN006": "block",        # UN DPRK + dual-use machinery
+        "SAN007": "clear",        # ICRC + valid humanitarian GL
+        "SAN008": "block",        # Wagner Group shell
+        "SAN009": "clear",        # Iranian student + valid GL for tuition
+        "SAN010": "block",        # Gazprom Neft SDN, no license
+        "SAN011": "investigate",  # similar name — needs human OFAC review
+        "SAN012": "block",        # Hamas-linked charity + FinCEN advisory
+    }
+    return txns, ground_truth, instructions, 4
+
+
+# ── TASK 6: Crypto DeFi AML (Expert) ─────────────────────────────────────────
+def _task_crypto_defi() -> Tuple[List[Transaction], Dict[str, str], str, int]:
+    instructions = (
+        "CRYPTO/DEFI AML EXPERT MODE: You are reviewing 18 on-chain and off-chain transactions "
+        "involving cryptocurrency, DeFi protocols, NFTs, and crypto exchanges. "
+        "This task requires knowledge of blockchain-specific typologies: "
+        "mixer/tumbler usage, cross-chain bridge hopping, peel chains, NFT wash trading, "
+        "rug pulls, darknet market off-ramps, and ransomware payment flows. "
+        "Decisions: 'block', 'investigate', or 'clear'. "
+        "Investigation budget: 5. "
+        "Blockchain analytics (Chainalysis/Elliptic) flags are included in notes where available."
+    )
+    txns = [
+        Transaction(
+            id="DFI001", amount=85_000.0, sender_id="TORNADO_CASH_OUTPUT", receiver_id="CEX_DEPOSIT",
+            sender_country="--", receiver_country="US",
+            transaction_type="crypto", velocity_24h=1, is_round_number=False,
+            prior_flags=2, amount_vs_avg_ratio=999.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Chainalysis: funds exiting Tornado Cash (OFAC-designated mixer). Direct deposit to centralized exchange."
+        ),
+        Transaction(
+            id="DFI002", amount=12_500.0, sender_id="DEFI_WALLET_LEGIT", receiver_id="CEX_WITHDRAW",
+            sender_country="--", receiver_country="US",
+            transaction_type="crypto", velocity_24h=2, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=1.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Uniswap LP withdrawal — on-chain history shows legitimate DeFi yield farming for 14 months. KYC verified."
+        ),
+        Transaction(
+            id="DFI003", amount=340_000.0, sender_id="RANSOMWARE_WALLET", receiver_id="MIXING_SERVICE",
+            sender_country="--", receiver_country="--",
+            transaction_type="crypto", velocity_24h=5, is_round_number=False,
+            prior_flags=3, amount_vs_avg_ratio=999.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="FBI alert: wallet linked to Lazarus Group ransomware campaign. Funds moving to unlicensed mixer."
+        ),
+        Transaction(
+            id="DFI004", amount=2_800.0, sender_id="NFT_TRADER_A", receiver_id="NFT_TRADER_B",
+            sender_country="--", receiver_country="--",
+            transaction_type="crypto", velocity_24h=8, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=1.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="NFT trades between same two wallets 8 times today at incrementing prices — classic wash trading pattern."
+        ),
+        Transaction(
+            id="DFI005", amount=920_000.0, sender_id="BRIDGE_HOP_WALLET", receiver_id="CLEAN_WALLET",
+            sender_country="--", receiver_country="--",
+            transaction_type="crypto", velocity_24h=3, is_round_number=False,
+            prior_flags=1, amount_vs_avg_ratio=15.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Elliptic: funds bridged ETH→BSC→Polygon→Arbitrum in 2 hours — cross-chain layering to obscure trail."
+        ),
+        Transaction(
+            id="DFI006", amount=45_000.0, sender_id="STAKING_REWARDS", receiver_id="PERSONAL_WALLET",
+            sender_country="--", receiver_country="US",
+            transaction_type="crypto", velocity_24h=1, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=1.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Ethereum staking rewards withdrawal — Lido Finance, 18 month staking history, tax docs filed."
+        ),
+        Transaction(
+            id="DFI007", amount=1_200_000.0, sender_id="RUGPULL_DEPLOYER", receiver_id="MIXER_WALLET",
+            sender_country="--", receiver_country="--",
+            transaction_type="crypto", velocity_24h=1, is_round_number=False,
+            prior_flags=2, amount_vs_avg_ratio=999.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Smart contract deployer drained $1.2M from liquidity pool (rug pull) and immediately routing to mixer."
+        ),
+        Transaction(
+            id="DFI008", amount=8_900.0, sender_id="PEEL_CHAIN_END", receiver_id="EXCHANGE_ACCT",
+            sender_country="--", receiver_country="GB",
+            transaction_type="crypto", velocity_24h=1, is_round_number=False,
+            prior_flags=1, amount_vs_avg_ratio=3.0, high_risk_country=False,
+            structuring_indicator=True, shell_company_indicator=False, pep_involved=False,
+            notes="Chainalysis: end of 47-hop peel chain originating from darknet market wallet. Small amount to avoid detection."
+        ),
+        Transaction(
+            id="DFI009", amount=5_500.0, sender_id="GAMING_WALLET", receiver_id="PLAYER_ACCT",
+            sender_country="--", receiver_country="US",
+            transaction_type="crypto", velocity_24h=1, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=1.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Axie Infinity play-to-earn withdrawal — legitimate gaming income, consistent weekly pattern for 8 months."
+        ),
+        Transaction(
+            id="DFI010", amount=2_100_000.0, sender_id="LAZARUS_BRIDGE_OUT", receiver_id="OTC_DESK",
+            sender_country="KP", receiver_country="--",
+            transaction_type="crypto", velocity_24h=1, is_round_number=False,
+            prior_flags=3, amount_vs_avg_ratio=999.0, high_risk_country=True,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="UN Panel: DPRK Lazarus Group wallet. Funds from Harmony Bridge hack. Moving to unlicensed OTC desk."
+        ),
+        Transaction(
+            id="DFI011", amount=33_000.0, sender_id="PRIVACY_COIN_MONERO", receiver_id="CEX_XMR",
+            sender_country="--", receiver_country="US",
+            transaction_type="crypto", velocity_24h=2, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=2.5, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Monero (XMR) deposit to exchange — privacy coin, untraceable. No prior flags but 2.5x account average."
+        ),
+        Transaction(
+            id="DFI012", amount=15_000.0, sender_id="CRYPTO_SALARY_ACCT", receiver_id="PERSONAL_BANK",
+            sender_country="--", receiver_country="US",
+            transaction_type="crypto", velocity_24h=1, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=1.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Monthly crypto salary from verified tech employer (Coinbase payroll) — W2 on file, consistent pattern."
+        ),
+        Transaction(
+            id="DFI013", amount=780_000.0, sender_id="DARKNET_MARKET_WALLET", receiver_id="CHAIN_HOP",
+            sender_country="--", receiver_country="--",
+            transaction_type="crypto", velocity_24h=4, is_round_number=False,
+            prior_flags=3, amount_vs_avg_ratio=999.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Chainalysis High Risk: wallet directly linked to Hydra darknet marketplace. Multi-chain hop initiated."
+        ),
+        Transaction(
+            id="DFI014", amount=4_200.0, sender_id="AIRDROP_RECIPIENT", receiver_id="DEX_SWAP",
+            sender_country="--", receiver_country="--",
+            transaction_type="crypto", velocity_24h=1, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=1.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Uniswap airdrop token claim and immediate swap to ETH — standard DeFi user behavior, no risk flags."
+        ),
+        Transaction(
+            id="DFI015", amount=95_000.0, sender_id="SANCTIONED_EXCHANGE", receiver_id="PERSONAL_WALLET",
+            sender_country="--", receiver_country="RU",
+            transaction_type="crypto", velocity_24h=1, is_round_number=False,
+            prior_flags=2, amount_vs_avg_ratio=8.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Withdrawal from Garantex — Russian crypto exchange directly on OFAC SDN list since April 2022."
+        ),
+        Transaction(
+            id="DFI016", amount=220_000.0, sender_id="NFT_WASH_ORCHESTRATOR", receiver_id="ART_PLATFORM",
+            sender_country="--", receiver_country="US",
+            transaction_type="crypto", velocity_24h=6, is_round_number=False,
+            prior_flags=1, amount_vs_avg_ratio=20.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=True, pep_involved=False,
+            notes="6 NFT sales today between controlled wallets — blockchain analysis shows same entity controls buyer and seller wallets."
+        ),
+        Transaction(
+            id="DFI017", amount=3_400.0, sender_id="P2P_TRADER_VERIFIED", receiver_id="USER_WALLET",
+            sender_country="NG", receiver_country="US",
+            transaction_type="crypto", velocity_24h=1, is_round_number=False,
+            prior_flags=0, amount_vs_avg_ratio=1.1, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Binance P2P verified trader — remittance to family in US. KYC Level 2 completed, consistent pattern."
+        ),
+        Transaction(
+            id="DFI018", amount=560_000.0, sender_id="DEFI_PROTOCOL_HACK", receiver_id="TUMBLER_NETWORK",
+            sender_country="--", receiver_country="--",
+            transaction_type="crypto", velocity_24h=2, is_round_number=False,
+            prior_flags=3, amount_vs_avg_ratio=999.0, high_risk_country=False,
+            structuring_indicator=False, shell_company_indicator=False, pep_involved=False,
+            notes="Rekt.news confirmed: $560k from Euler Finance exploit. Hacker moving funds through tumbler network."
+        ),
+    ]
+    ground_truth = {
+        "DFI001": "block",        # Tornado Cash = OFAC designated
+        "DFI002": "clear",        # legit DeFi yield farming
+        "DFI003": "block",        # Lazarus ransomware + mixer
+        "DFI004": "investigate",  # NFT wash trading — needs review
+        "DFI005": "investigate",  # cross-chain layering — suspicious
+        "DFI006": "clear",        # legit staking rewards
+        "DFI007": "block",        # rug pull + mixer
+        "DFI008": "block",        # darknet peel chain
+        "DFI009": "clear",        # legit gaming income
+        "DFI010": "block",        # Lazarus Group DPRK
+        "DFI011": "investigate",  # privacy coin — elevated risk
+        "DFI012": "clear",        # legit crypto salary
+        "DFI013": "block",        # Hydra darknet market
+        "DFI014": "clear",        # normal airdrop claim
+        "DFI015": "block",        # Garantex = OFAC SDN
+        "DFI016": "investigate",  # NFT wash trading orchestrator
+        "DFI017": "clear",        # verified P2P remittance
+        "DFI018": "block",        # DeFi exploit funds
     }
     return txns, ground_truth, instructions, 5
