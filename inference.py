@@ -20,7 +20,7 @@ from openai import AsyncOpenAI
 # ── Config 
 
 HF_TOKEN     = os.environ.get("HF_TOKEN", "")
-MODEL_NAME   = os.environ.get("MODEL_NAME", "llama-3.1-8b-instant")
+MODEL_NAME   = os.environ.get("MODEL_NAME", "llama-3.1-70b-versatile")
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
 ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "http://localhost:7860")
 
@@ -36,11 +36,10 @@ You are reviewing a batch of flagged transactions. For each transaction, you mus
 - **clear**: Mark as legitimate. Only when you are genuinely confident the transaction is not suspicious.
 
 CRITICAL ANALYSIS RULES:
-1. Cross-transaction patterns matter. The same sender sending multiple sub-threshold amounts on the same day = structuring. Flag ALL of them.
-2. Follow the money chain. If entity A sends to B and B immediately forwards the same amount to a high-risk country, that is layering — flag EVERY link in the chain, not just the most obvious one.
-3. Legitimate transactions exist. Do NOT flag payroll, documented invoices, utility bills, or tuition payments. False positives reduce your score.
-4. Reasoning earns bonus points. For suspicious transactions, use specific terminology: structuring, smurfing, layering, integration, shell company, PEP, sanctions evasion, mirror trade, trade-based money laundering, crypto mixer, placement.
-5. Manage your budget. Prefer block over investigate for high-confidence suspicious transactions — it scores higher and saves budget.
+1. Standard AML Procedures: Evaluate each transaction based on standard global banking regulations (FATF/FinCEN guidelines).
+2. Holistic Review: Consider the relationship between different transactions in the batch to identify complex patterns.
+3. Accuracy Matters: Your performance is based on correctly identifying suspicious activity while maintaining a low false-positive rate for legitimate business.
+4. Professional Justification: Provide a brief, professional justification for any 'block' or 'investigate' decisions using industry-standard terminology.
 
 OUTPUT: Respond ONLY with a valid JSON object. No markdown, no explanation outside the JSON:
 {

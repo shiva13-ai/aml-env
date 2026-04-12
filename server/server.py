@@ -5,7 +5,7 @@ or simply:
     python server/server.py
 """
 import uvicorn
-from .app import app  # noqa: F401 — re-exported for uvicorn
+from app import app
 
 if __name__ == "__main__":
     uvicorn.run(

@@ -35,7 +35,7 @@ class AMLEnvironment:
         self._state: Optional[AMLState] = None
         self._task_name: Optional[str] = None
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    # ── Public API
 
     def reset(self, task_name: str) -> AMLObservation:
         if task_name not in TASKS:
@@ -163,7 +163,8 @@ class AMLEnvironment:
         else:
             reward = (raw_score - budget_penalty) / max_score
             reward = reward + reasoning_bonus + chain_bonus
-            reward = max(0.0, min(1.0, reward))
+            epsilon = 0.0001
+            reward = max(epsilon, min(1.0 - epsilon, reward))
 
         self._state.done = True
 

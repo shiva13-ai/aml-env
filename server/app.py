@@ -29,7 +29,7 @@ app = FastAPI(
 env = AMLEnvironment()
 
 
-# ── Global error handlers ─────────────────────────────────────────────────────
+# ── Global error handlers 
 
 @app.exception_handler(ValidationError)
 async def validation_error_handler(request: Request, exc: ValidationError):
@@ -59,7 +59,7 @@ async def runtime_error_handler(request: Request, exc: RuntimeError):
     )
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# ── Endpoints 
 
 @app.get("/health", response_model=HealthResponse, tags=["meta"])
 async def health():
