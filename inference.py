@@ -122,7 +122,7 @@ async def run_task(client: httpx.AsyncClient, task_name: str) -> float:
     r = await client.post("/reset", json={"task_name": task_name})
     r.raise_for_status()
     obs = r.json()
-    print(f"[START] task={task_name}", flush=True)
+    print(f"[START] task={task_name} env=aml-compliance-env model={MODEL_NAME}", flush=True)
     await asyncio.sleep(0.5)
     print(f"  Transactions: {len(obs['transactions'])}  |  Budget: {obs['investigation_budget']}")
 
@@ -133,17 +133,19 @@ async def run_task(client: httpx.AsyncClient, task_name: str) -> float:
         action = parse_action(raw)
     except (json.JSONDecodeError, ValueError) as e:
         print(f"  ❌ Parse failed: {e}\n  Raw: {raw[:300]}")
-        return 0.0
+        print(f"[END] success=false steps=0 score=0.001 rewards=0.001", flush=True)
+        return 0.001
 
     r = await client.post("/step", json=action)
     if r.status_code != 200:
         print(f"  ❌ /step error {r.status_code}: {r.text}")
-        return 0.0
+        print(f"[END] success=false steps=0 score=0.001 rewards=0.001", flush=True)
+        return 0.001
 
     result = r.json()
     reward = result["reward"]
     info   = result["info"]
-    print(f"[STEP] step=1 reward={reward:.4f}", flush=True)
+    print(f"[STEP] step=1 action={json.dumps(action)} reward={reward:.4f} done=true error=null", flush=True)
 
     print(f"\n  Score:            {reward:.4f}")
     print(f"  Raw:              {info['raw_score']:.1f} / {info['max_possible_raw']:.1f}")
@@ -162,9 +164,9 @@ async def run_task(client: httpx.AsyncClient, task_name: str) -> float:
         bonus = f"  (+{d['reasoning_bonus']:.2f})" if d["reasoning_bonus"] > 0 else ""
         print(f"    {mark} {d['transaction_id']}: {d['decision']} "
               f"(true={d['true_label']}, pts={d['points_earned']:+.1f}){bonus}")
-    print(f"[END] task={task_name} score={reward:.4f} steps=1", flush=True)
+    success = reward >= 0.5
+    print(f"[END] success={str(success).lower()} steps=1 score={reward:.4f} rewards={reward:.4f}", flush=True)
     return reward
-
 
 async def main():
     if not HF_TOKEN:
@@ -187,7 +189,7 @@ async def main():
                 scores[task] = await run_task(client, task)
             except Exception as e:
                 print(f"  ❌ {task} failed: {e}")
-                scores[task] = 0.0
+                scores[task] = 0.001
 
     print(f"\n{'='*60}")
     print("  FINAL SCORES")
