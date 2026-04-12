@@ -1,6 +1,4 @@
-"""
-FastAPI app instance — imported by server.py for uvicorn.
-"""
+from typing import Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -28,9 +26,6 @@ app = FastAPI(
 
 env = AMLEnvironment()
 
-
-# ── Global error handlers 
-
 @app.exception_handler(ValidationError)
 async def validation_error_handler(request: Request, exc: ValidationError):
     return JSONResponse(
@@ -42,14 +37,12 @@ async def validation_error_handler(request: Request, exc: ValidationError):
         },
     )
 
-
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
     return JSONResponse(
         status_code=400,
         content={"error": "Bad request", "detail": str(exc)},
     )
-
 
 @app.exception_handler(RuntimeError)
 async def runtime_error_handler(request: Request, exc: RuntimeError):
@@ -58,18 +51,12 @@ async def runtime_error_handler(request: Request, exc: RuntimeError):
         content={"error": "Environment state error", "detail": str(exc)},
     )
 
-
-# ── Endpoints 
-
 @app.get("/health", response_model=HealthResponse, tags=["meta"])
 async def health():
-    """Health check."""
     return HealthResponse()
-
 
 @app.get("/tasks", response_model=TaskList, tags=["meta"])
 async def list_tasks():
-    """List all available tasks."""
     return TaskList(tasks=[
         TaskInfo(
             name=name,
@@ -82,22 +69,13 @@ async def list_tasks():
         for name, data in TASKS.items()
     ])
 
-
 @app.post("/reset", response_model=AMLObservation, tags=["env"])
-async def reset(body: dict):
-    """
-    Start a new episode.
+async def reset(body: Optional[dict] = None):
+    if body is None:
+        task_name = "triage_basic"
+    else:
+        task_name = body.get("task_name", "triage_basic")
 
-    Body: `{"task_name": "triage_basic"}`
-
-    Available: `triage_basic`, `triage_network`, `triage_adversarial`, `triage_chain`
-    """
-    task_name = body.get("task_name")
-    if not task_name:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Missing 'task_name'. Available: {list(TASKS.keys())}",
-        )
     if task_name not in TASKS:
         raise HTTPException(
             status_code=404,
@@ -108,16 +86,8 @@ async def reset(body: dict):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-
 @app.post("/step", response_model=StepResult, tags=["env"])
 async def step(action: AMLAction):
-    """
-    Submit decisions for the current episode.
-
-    Each decision: `transaction_id`, `decision` (block/investigate/clear), optional `reasoning`.
-
-    Returns reward in [0, 1] plus a full breakdown in `info`.
-    """
     try:
         return env.step(action)
     except RuntimeError as exc:
@@ -127,10 +97,8 @@ async def step(action: AMLAction):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-
 @app.get("/state", response_model=AMLState, tags=["env"])
 async def get_state():
-    """Get current environment state. Returns 409 if no episode started."""
     try:
         return env.get_state()
     except RuntimeError as exc:
