@@ -1,91 +1,120 @@
 """
-Baseline inference script — runs all 4 tasks using an LLM.
+Baseline inference script — AML Compliance Officer Environment
+==============================================================
+MANDATORY env variables:
+    HF_TOKEN       Your HuggingFace / API key
+    MODEL_NAME     Model identifier     (default: Qwen/Qwen2.5-72B-Instruct)
+    API_BASE_URL   LLM API endpoint     (default: https://router.huggingface.co/v1)
+    ENV_BASE_URL   AML env server       (default: http://localhost:7860)
 
-Usage:
-    export HF_TOKEN=your_token_here
-    export MODEL_NAME=Qwen/Qwen2.5-72B-Instruct        # optional
-    export API_BASE_URL=https://router.huggingface.co/v1 # optional
-    export ENV_BASE_URL=http://localhost:7860             # optional
-    python inference.py
+STDOUT FORMAT (strict — required by OpenEnv evaluator):
+    [START] task=<task_name> env=<benchmark> model=<model_name>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
+
 import asyncio
 import json
 import os
 import re
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 import httpx
 from openai import AsyncOpenAI
 
 # ── Config 
-
 HF_TOKEN     = os.environ.get("HF_TOKEN", "")
-MODEL_NAME   = os.environ.get("MODEL_NAME", "llama-3.3-70b-versatile")
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
+MODEL_NAME   = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
 ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "http://localhost:7860")
 
-TASKS = ["triage_basic", "triage_network", "triage_adversarial", "triage_chain"]
+BENCHMARK = "aml-compliance-env"
+TASKS: List[str] = ["triage_basic", "triage_network", "triage_adversarial", "triage_chain"]
+SUCCESS_THRESHOLD = 0.5
 
-# ── System prompt
-SYSTEM_PROMPT = """You are a senior AML (Anti-Money Laundering) Compliance Officer at a global bank with 20 years of experience detecting financial crime.
+# ── Logging helpers (must match OpenEnv spec exactly)
 
-You are reviewing a batch of flagged transactions. For each transaction, you must decide:
-- **block**: Freeze funds immediately. Use when there is strong, clear evidence (OFAC sanctions, PEP + shell company, confirmed crypto mixer, placement stage with no plausible explanation).
-- **investigate**: Flag for deeper review. Use when suspicious but not conclusive (anomalous pattern, high-risk country without other flags, structuring indicator needing verification).
-- **clear**: Mark as legitimate. Only when you are genuinely confident the transaction is not suspicious.
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
-CRITICAL ANALYSIS RULES:
-1. STRICT BUDGET LIMIT: You are given an "INVESTIGATION BUDGET" in the prompt. You MUST NOT output the "investigate" decision more times than this budget allows for the entire batch. Count your investigations carefully! If you are out of budget, force a "block" or "clear".
-2. ADVERSARIAL TACTICS: Watch out for advanced evasion techniques:
-   - Smurfing / Delayed Aggregation (multiple small transactions meant to evade reporting).
-   - Trade-based money laundering (e.g., over-invoiced goods, strange trade corridors).
-   - Charity front abuse or Anonymous LLCs in real estate.
-   - Darknet / Crypto mixer outputs.
-3. RISK AVERSION: Clearing a suspicious transaction incurs a massive penalty (-2.0). If you are highly suspicious of a transaction but have run out of your investigation budget, it is safer to BLOCK than to clear.
-4. Professional Justification: Provide a brief, professional justification for any 'block' or 'investigate' decisions.
 
-OUTPUT: Respond ONLY with a valid JSON object. No markdown, no explanation outside the JSON:
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    # spec: reward=<0.00>  done=<true|false>  error=<msg|null>
+    reward_safe = _clamp(reward)
+    print(
+        f"[STEP] step={step} action={action} "
+        f"reward={reward_safe:.2f} done={str(done).lower()} error={error or 'null'}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    # spec: score and each reward formatted to 2 decimal places, strictly in (0, 1)
+    score_safe = _clamp(score)
+    rewards_str = ",".join(f"{_clamp(r):.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score_safe:.2f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+def _clamp(v: float) -> float:
+    """Clamp to strictly open interval (0.01, 0.99) so :.2f never prints 0.00 or 1.00."""
+    return max(0.01, min(0.99, float(v)))
+
+
+# ── System prompt 
+SYSTEM_PROMPT = """You are a senior AML (Anti-Money Laundering) Compliance Officer at a global bank.
+
+Review each transaction and decide:
+- "block": Freeze immediately — OFAC/SDN match, PEP + shell company, confirmed mixer output, sanctions country.
+- "investigate": Flag for review — suspicious but not conclusive, structuring pattern, high-risk corridor.
+- "clear": Mark as legitimate — only when genuinely confident.
+
+RULES:
+1. BUDGET: Never exceed the stated investigation budget with "investigate" decisions. If over budget, use "block" instead.
+2. RISK: Clearing a suspicious transaction = -2 penalty. When uncertain and budget is gone, BLOCK not clear.
+3. OUTPUT: Valid JSON only, no markdown, no text outside the JSON.
+
+Format:
 {
   "decisions": [
-    {"transaction_id": "TXN001", "decision": "block", "reasoning": "Structuring: cash deposits just below $10k CTR threshold on consecutive days."},
+    {"transaction_id": "TXN001", "decision": "block", "reasoning": "specific reason"},
     {"transaction_id": "TXN002", "decision": "clear", "reasoning": ""}
   ]
 }
 
-Include EVERY transaction_id from the observation. Do not skip any.
-"""
+Include EVERY transaction_id. Do not skip any."""
 
 
 # ── LLM call 
-
-async def call_llm(user_message: str) -> str:
-    client = AsyncOpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
+async def call_llm(client: AsyncOpenAI, user_message: str) -> str:
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
+            {"role": "user",   "content": user_message},
         ],
         temperature=0.1,
         max_tokens=3000,
     )
-    return response.choices[0].message.content
+    return response.choices[0].message.content or ""
 
 
-def parse_action(raw: str) -> dict[str, Any]:
+def parse_action(raw: str) -> Dict[str, Any]:
     clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
     match = re.search(r"\{.*\}", clean, re.DOTALL)
     if not match:
-        raise ValueError(f"No JSON found in model output:\n{raw}")
+        raise ValueError(f"No JSON object found in model output:\n{raw[:300]}")
     return json.loads(match.group())
 
 
-def format_observation(obs: dict) -> str:
-    txns = obs["transactions"]
+def format_observation(obs: Dict) -> str:
+    txns   = obs["transactions"]
     budget = obs["investigation_budget"]
-    task = obs["task_name"]
-
-    lines = [
+    task   = obs["task_name"]
+    lines  = [
         f"TASK: {task}",
         f"INVESTIGATION BUDGET: {budget} (max {budget} 'investigate' decisions allowed)",
         f"TRANSACTIONS TO REVIEW ({len(txns)} total):",
@@ -112,93 +141,94 @@ def format_observation(obs: dict) -> str:
     return "\n".join(lines)
 
 
-# ── Task runner 
+# ── Per-task episode runner 
+async def run_task(http: httpx.AsyncClient, llm: AsyncOpenAI, task_name: str) -> float:
+    rewards:     List[float] = []
+    steps_taken: int         = 0
+    score:       float       = 0.01   # safe fallback — never exact 0.0
+    success:     bool        = False
 
-async def run_task(client: httpx.AsyncClient, task_name: str) -> float:
-    print(f"\n{'='*60}")
-    print(f"  TASK: {task_name}")
-    print(f"{'='*60}")
-
-    r = await client.post("/reset", json={"task_name": task_name})
-    r.raise_for_status()
-    obs = r.json()
-    print(f"[START] task={task_name} env=aml-compliance-env model={MODEL_NAME}", flush=True)
-    await asyncio.sleep(0.5)
-    print(f"  Transactions: {len(obs['transactions'])}  |  Budget: {obs['investigation_budget']}")
-
-    print(f"  Calling {MODEL_NAME}...")
-    raw = await call_llm(format_observation(obs))
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        action = parse_action(raw)
-    except (json.JSONDecodeError, ValueError) as e:
-        print(f"  ❌ Parse failed: {e}\n  Raw: {raw[:300]}")
-        print(f"[END] success=false steps=0 score=0.001 rewards=0.001", flush=True)
-        return 0.001
-
-    r = await client.post("/step", json=action)
-    if r.status_code != 200:
-        print(f"  ❌ /step error {r.status_code}: {r.text}")
-        print(f"[END] success=false steps=0 score=0.001 rewards=0.001", flush=True)
-        return 0.001
-
-    result = r.json()
-    reward = result["reward"]
-    info   = result["info"]
-    print(f"[STEP] step=1 action={json.dumps(action)} reward={reward:.4f} done=true error=null", flush=True)
-
-    print(f"\n  Score:            {reward:.4f}")
-    print(f"  Raw:              {info['raw_score']:.1f} / {info['max_possible_raw']:.1f}")
-    print(f"  Reasoning bonus:  +{info['reasoning_bonus']:.4f}")
-    if info.get("chain_bonus", 0) > 0:
-        print(f"  Chain bonus:      +{info['chain_bonus']:.4f}")
-    print(f"  Budget penalty:   -{info['budget_penalty']:.4f}")
-    print(f"  Investigate used: {info['investigate_count']} / {info['investigation_budget']}")
-
-    if info.get("missed_suspicious_transactions"):
-        print(f"  ⚠  Missed: {info['missed_suspicious_transactions']}")
-
-    print(f"\n  Decision breakdown:")
-    for d in info["decision_breakdown"]:
-        mark  = "✅" if d["correct"] else "❌"
-        bonus = f"  (+{d['reasoning_bonus']:.2f})" if d["reasoning_bonus"] > 0 else ""
-        print(f"    {mark} {d['transaction_id']}: {d['decision']} "
-              f"(true={d['true_label']}, pts={d['points_earned']:+.1f}){bonus}")
-    success = reward >= 0.5
-    print(f"[END] success={str(success).lower()} steps=1 score={reward:.4f} rewards={reward:.4f}", flush=True)
-    return reward
-
-async def main():
-    if not HF_TOKEN:
-        print("⚠  HF_TOKEN not set — export HF_TOKEN=your_token_here")
-
-    print(f"\nAML Compliance Officer — Baseline Inference")
-    print(f"Model : {MODEL_NAME}")
-    print(f"API   : {API_BASE_URL}")
-    print(f"Env   : {ENV_BASE_URL}")
-
-    scores: dict[str, float] = {}
-
-    async with httpx.AsyncClient(base_url=ENV_BASE_URL, timeout=120.0) as client:
-        r = await client.get("/health")
+        # ── Reset
+        r = await http.post("/reset", json={"task_name": task_name})
         r.raise_for_status()
-        print(f"\nHealth: {r.json()}")
+        obs = r.json()
+
+        # ── Get LLM decision
+        raw = await call_llm(llm, format_observation(obs))
+        action = parse_action(raw)
+
+        # ── Step
+        r = await http.post("/step", json=action)
+        r.raise_for_status()
+        result = r.json()
+
+        reward      = float(result.get("reward", 0.01))
+        done        = bool(result.get("done", True))
+        info        = result.get("info", {})
+        steps_taken = 1
+        rewards.append(reward)
+
+        log_step(
+            step=1,
+            action=json.dumps(action),
+            reward=reward,
+            done=done,
+            error=None,
+        )
+
+        # Debug breakdown (not parsed by evaluator)
+        print(f"  Raw: {info.get('raw_score','?')} / {info.get('max_possible_raw','?')} "
+              f"| bonus: +{info.get('reasoning_bonus',0):.4f} "
+              f"| chain: +{info.get('chain_bonus',0):.4f} "
+              f"| budget_penalty: -{info.get('budget_penalty',0):.4f}", flush=True)
+
+        score   = reward
+        success = score >= SUCCESS_THRESHOLD
+
+    except Exception as exc:
+        print(f"[DEBUG] {task_name} error: {exc}", flush=True)
+        score   = 0.01
+        rewards = [0.01]
+
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+    return score
+
+
+# ── Main
+async def main() -> None:
+    if not HF_TOKEN:
+        print("⚠  HF_TOKEN not set", flush=True)
+
+    llm    = AsyncOpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
+    scores: Dict[str, float] = {}
+
+    async with httpx.AsyncClient(base_url=ENV_BASE_URL, timeout=120.0) as http:
+        # Health check
+        r = await http.get("/health")
+        r.raise_for_status()
+        print(f"Health: {r.json()}", flush=True)
 
         for task in TASKS:
             try:
-                scores[task] = await run_task(client, task)
+                scores[task] = await run_task(http, llm, task)
             except Exception as e:
-                print(f"  ❌ {task} failed: {e}")
-                scores[task] = 0.001
+                print(f"[DEBUG] {task} outer error: {e}", flush=True)
+                scores[task] = 0.01   # safe fallback — never exact 0.0
 
-    print(f"\n{'='*60}")
-    print("  FINAL SCORES")
-    print(f"{'='*60}")
-    for task, score in scores.items():
-        bar = "█" * int(score * 20)
-        print(f"  {task:<25} {score:.4f}  {bar}")
-    avg = sum(scores.values()) / len(scores) if scores else 0
-    print(f"\n  Overall average:  {avg:.4f}")
+    # Summary (not parsed by evaluator)
+    print(f"\n{'='*60}", flush=True)
+    print("FINAL SCORES", flush=True)
+    print(f"{'='*60}", flush=True)
+    for task, s in scores.items():
+        bar = "█" * int(s * 20)
+        print(f"  {task:<25} {s:.4f}  {bar}", flush=True)
+    avg = sum(scores.values()) / len(scores) if scores else 0.0
+    print(f"  {'AVERAGE':<25} {avg:.4f}", flush=True)
 
 
 if __name__ == "__main__":
