@@ -1,245 +1,199 @@
+"""
+Core AML environment — reset / step / state / grader logic.
+"""
+from __future__ import annotations
 import uuid
 from typing import Optional
-from dataclasses import dataclass, field
 
-from openenv.core.env_server.interfaces import Environment
-from openenv.core.env_server.types import State
-from models import AMLAction, AMLObservation
-from data import TASKS
+from .models import (
+    AMLAction,
+    AMLObservation,
+    AMLState,
+    StepResult,
+    Transaction,
+    TransactionGroundTruth,
+)
+from .data import TASKS
+
+# Chain groups: identifying the full chain earns a bonus
+CHAIN_GROUPS = {
+    "triage_chain": [
+        {"CHN001", "CHN002", "CHN003", "CHN005"},  # first wave full chain
+        {"CHN007", "CHN009"},                        # second wave
+    ]
+}
+
+REASONING_KEYWORDS = [
+    "structur", "smurf", "layer", "integrat", "shell", "pep", "sancti",
+    "mixer", "mirror", "front", "placement", "velocity", "threshold",
+    "ofac", "fatf", "round", "nominee", "crypto",
+]
 
 
-@dataclass
-class StepResult:
-    observation: object
-    reward: float
-    done: bool
-    info: dict = field(default_factory=dict)
+class AMLEnvironment:
+    def __init__(self) -> None:
+        self._state: Optional[AMLState] = None
+        self._task_name: Optional[str] = None
 
+    # ── Public API ────────────────────────────────────────────────────────────
 
-class AMLEnvironment(Environment):
-    """
-    AML Compliance Officer environment.
-    Each episode: agent reviews transactions one-by-one, deciding block/investigate/clear.
-    Multi-turn: one step = one transaction decision.
-    """
-
-    SUPPORTS_CONCURRENT_SESSIONS = True
-    TASK_NAMES = ["triage_basic", "triage_network", "triage_adversarial"]
-
-    def __init__(self):
-        self._state = State(episode_id=str(uuid.uuid4()), step_count=0)
-        self._task_name: str = "triage_basic"
-        self._transactions: list = []
-        self._ground_truth: dict = {}
-        self._budget: int = 2
-        self._decisions: dict = {}
-        self._step_index: int = 0
-        self._cumulative_reward: float = 0.0
-        self._done: bool = False
-        self.reset()
-
-    def reset(self, task_name: Optional[str] = None, episode_id: Optional[str] = None, **kwargs) -> AMLObservation:
-        """Start a new episode. Optionally select a task."""
-        if task_name is None:
-            task_name = "triage_basic"
+    def reset(self, task_name: str) -> AMLObservation:
         if task_name not in TASKS:
-            task_name = "triage_basic"
+            raise ValueError(
+                f"Unknown task '{task_name}'. "
+                f"Available tasks: {list(TASKS.keys())}"
+            )
 
         task = TASKS[task_name]
+        episode_id = str(uuid.uuid4())
+
+        transactions = [Transaction(**t) for t in task["transactions"]]
+        observation = AMLObservation(
+            task_name=task_name,
+            episode_id=episode_id,
+            transactions=transactions,
+            investigation_budget=task["investigation_budget"],
+        )
+        ground_truth = [
+            TransactionGroundTruth(**g) for g in task["ground_truth"]
+        ]
+
         self._task_name = task_name
-        self._transactions = task["transactions"]
-        self._ground_truth = task["ground_truth"]
-        self._budget = task["investigation_budget"]
-        self._decisions = {}
-        self._step_index = 0
-        self._cumulative_reward = 0.0
-        self._done = False
-        self._state = State(episode_id=episode_id or str(uuid.uuid4()), step_count=0)
-
-        return self._make_observation("Episode started. Review each transaction carefully.")
-
-    def step(self, action: AMLAction, **kwargs) -> StepResult:
-        """Process one transaction decision."""
-
-        # ✅ Guard: episode already finished
-        if self._done or self._step_index >= len(self._transactions):
-            obs = self._make_observation("Episode already finished. Call reset() to start again.")
-            return StepResult(
-                observation=obs,
-                reward=0.0,
-                done=True,
-                info={"error": "episode_done"}
-            )
-
-        # Force correct transaction_id to match current step
-        current_txn = self._transactions[self._step_index]
-        action.transaction_id = current_txn["id"]
-
-        # Record decision
-        self._decisions[current_txn["id"]] = {
-            "decision": action.decision,
-            "reasoning": action.reasoning
-        }
-
-        # Compute per-step reward
-        reward = self._score_decision(
-            txn_id=current_txn["id"],
-            decision=action.decision,
-            reasoning=action.reasoning
+        self._state = AMLState(
+            task_name=task_name,
+            episode_id=episode_id,
+            done=False,
+            observation=observation,
+            ground_truth=ground_truth,
         )
-        self._cumulative_reward += reward
-        self._step_index += 1
-        self._state.step_count += 1
+        return observation
 
-        # Check if episode is done
-        if self._step_index >= len(self._transactions):
-            self._done = True
-            final_score = self._normalize_score()
-            obs = self._make_observation(
-                f"Episode complete! Final score: {final_score:.3f}",
-                override_done=True
-            )
-            return StepResult(
-                observation=obs,
-                reward=final_score,
-                done=True,
-                info={
-                    "final_score": final_score,
-                    "decisions": self._decisions,
-                    "task": self._task_name
-                }
+    def step(self, action: AMLAction) -> StepResult:
+        if self._state is None or self._state.done:
+            raise RuntimeError(
+                "No active episode. Call /reset before /step."
             )
 
-        obs = self._make_observation(
-            f"Decision recorded: {action.decision}. Next transaction below."
-        )
+        obs = self._state.observation
+        gt_map = {g.transaction_id: g for g in self._state.ground_truth}
+        valid_ids = {t.id for t in obs.transactions}
+
+        # Validate submitted IDs
+        unknown_ids = [
+            d.transaction_id for d in action.decisions
+            if d.transaction_id not in valid_ids
+        ]
+        if unknown_ids:
+            raise ValueError(
+                f"Unknown transaction_id(s): {unknown_ids}. "
+                f"Valid IDs are: {sorted(valid_ids)}"
+            )
+
+        # Score each decision
+        raw_score = 0.0
+        max_score = 0.0
+        reasoning_bonus = 0.0
+        investigate_count = 0
+        decision_results = []
+
+        for decision in action.decisions:
+            tid = decision.transaction_id
+            gt = gt_map[tid]
+            dec = decision.decision
+            reasoning = (decision.reasoning or "").lower()
+            is_suspicious = gt.true_label == "suspicious"
+
+            if is_suspicious:
+                max_score += 3
+            else:
+                max_score += 1
+
+            points = 0.0
+            if dec == "block":
+                points = 3.0 if is_suspicious else -1.0
+            elif dec == "investigate":
+                investigate_count += 1
+                points = 2.0 if is_suspicious else -1.0
+            elif dec == "clear":
+                points = 1.0 if not is_suspicious else -2.0
+
+            r_bonus = 0.0
+            if is_suspicious and reasoning:
+                hits = sum(1 for kw in REASONING_KEYWORDS if kw in reasoning)
+                if hits >= 1:
+                    r_bonus = 0.02
+
+            raw_score += points
+            reasoning_bonus += r_bonus
+
+            decision_results.append({
+                "transaction_id": tid,
+                "decision": dec,
+                "correct": (
+                    (dec in ["block", "investigate"] and is_suspicious) or
+                    (dec == "clear" and not is_suspicious)
+                ),
+                "true_label": gt.true_label,
+                "points_earned": points,
+                "reasoning_bonus": r_bonus,
+            })
+
+        # Budget penalty
+        budget = obs.investigation_budget
+        over_budget = max(0, investigate_count - budget)
+        budget_penalty = over_budget * 0.5
+
+        # Chain bonus
+        chain_bonus = 0.0
+        if self._task_name in CHAIN_GROUPS:
+            flagged = {
+                d.transaction_id for d in action.decisions
+                if d.decision in ["block", "investigate"]
+            }
+            for chain in CHAIN_GROUPS[self._task_name]:
+                if chain.issubset(flagged):
+                    chain_bonus += 0.08
+
+        # Cap reasoning bonus
+        reasoning_bonus = min(reasoning_bonus, 0.10)
+
+        # Normalise to [0, 1]
+        if max_score <= 0:
+            reward = 0.0
+        else:
+            reward = (raw_score - budget_penalty) / max_score
+            reward = reward + reasoning_bonus + chain_bonus
+            reward = max(0.0, min(1.0, reward))
+
+        self._state.done = True
+
+        submitted_ids = {d.transaction_id for d in action.decisions}
+        missed = [
+            tid for tid, gt in gt_map.items()
+            if gt.true_label == "suspicious" and tid not in submitted_ids
+        ]
+
         return StepResult(
             observation=obs,
-            reward=reward,
-            done=False,
+            reward=round(reward, 4),
+            done=True,
             info={
-                "step_reward": reward,
-                "cumulative": self._cumulative_reward
-            }
+                "raw_score": raw_score,
+                "max_possible_raw": max_score,
+                "reasoning_bonus": round(reasoning_bonus, 4),
+                "chain_bonus": round(chain_bonus, 4),
+                "budget_penalty": round(budget_penalty, 4),
+                "investigate_count": investigate_count,
+                "investigation_budget": budget,
+                "over_budget_by": over_budget,
+                "decision_breakdown": decision_results,
+                "missed_suspicious_transactions": missed,
+                "total_transactions": len(valid_ids),
+                "submitted_decisions": len(action.decisions),
+            },
         )
 
-    @property
-    def state(self) -> State:
+    def get_state(self) -> AMLState:
+        if self._state is None:
+            raise RuntimeError("No active episode. Call /reset first.")
         return self._state
-
-    # ── Internal helpers ──────────────────────────────────────────────────────
-
-    def _make_observation(self, message: str = "", override_done: bool = False) -> AMLObservation:
-        """Build observation from current transaction. Safe — never goes out of range."""
-        if not self._transactions:
-            return AMLObservation(
-                transaction_id="N/A",
-                amount=0.0,
-                sender_country="XX",
-                receiver_country="XX",
-                transaction_type="unknown",
-                velocity_24h=0,
-                is_round_number=False,
-                prior_flags=0,
-                amount_vs_avg_ratio=0.0,
-                high_risk_country=False,
-                structuring_indicator=False,
-                shell_company_indicator=False,
-                pep_involved=False,
-                notes="Episode not started.",
-                step_number=0,
-                total_transactions=0,
-                investigation_budget=0,
-                investigations_used=0,
-                cumulative_reward=self._cumulative_reward,
-                task_name=self._task_name,
-                episode_done=self._done or override_done,
-                message=message,
-            )
-
-        # ✅ Clamp index so it never causes IndexError
-        idx = min(self._step_index, len(self._transactions) - 1)
-        txn = self._transactions[idx]
-
-        investigations_used = sum(
-            1 for d in self._decisions.values() if d["decision"] == "investigate"
-        )
-
-        return AMLObservation(
-            transaction_id=txn["id"],
-            amount=txn["amount"],
-            sender_country=txn["sender_country"],
-            receiver_country=txn["receiver_country"],
-            transaction_type=txn["transaction_type"],
-            velocity_24h=txn["velocity_24h"],
-            is_round_number=txn["is_round_number"],
-            prior_flags=txn["prior_flags"],
-            amount_vs_avg_ratio=txn["amount_vs_avg_ratio"],
-            high_risk_country=txn["high_risk_country"],
-            structuring_indicator=txn["structuring_indicator"],
-            shell_company_indicator=txn["shell_company_indicator"],
-            pep_involved=txn["pep_involved"],
-            notes=txn.get("notes", ""),
-            step_number=self._step_index + 1,
-            total_transactions=len(self._transactions),
-            investigation_budget=self._budget,
-            investigations_used=investigations_used,
-            cumulative_reward=self._cumulative_reward,
-            task_name=self._task_name,
-            episode_done=self._done or override_done,
-            message=message,
-        )
-
-    def _score_decision(self, txn_id: str, decision: str, reasoning: str) -> float:
-        """Score a single decision. Returns raw reward (normalized at episode end)."""
-        truth = self._ground_truth.get(txn_id, "legitimate")
-        investigations_used = sum(
-            1 for d in self._decisions.values() if d["decision"] == "investigate"
-        )
-
-        if truth == "suspicious":
-            if decision == "block":
-                reward = 3.0
-            elif decision == "investigate":
-                # Penalize going over budget
-                if investigations_used > self._budget:
-                    reward = 0.5
-                else:
-                    reward = 2.0
-            else:  # clear — false negative, worst outcome
-                reward = -2.0
-        else:  # legitimate
-            if decision == "clear":
-                reward = 1.0
-            elif decision == "investigate":
-                if investigations_used > self._budget:
-                    reward = -1.0
-                else:
-                    reward = -0.5
-            else:  # block — false positive
-                reward = -1.0
-
-        # Reasoning bonus (up to +0.2 per suspicious txn with good explanation)
-        if truth == "suspicious" and reasoning and len(reasoning.strip()) > 10:
-            reward += 0.2
-
-        return reward
-
-    def _normalize_score(self) -> float:
-        """Normalize cumulative reward to [0, 1]."""
-        n_suspicious = sum(1 for v in self._ground_truth.values() if v == "suspicious")
-        n_legit = len(self._ground_truth) - n_suspicious
-
-        # Best possible: all suspicious blocked with reasoning, all legit cleared
-        max_possible = (n_suspicious * 3.2) + (n_legit * 1.0)
-        # Worst possible: all suspicious cleared, all legit blocked
-        min_possible = (n_suspicious * -2.0) + (n_legit * -1.0)
-
-        if max_possible == min_possible:
-            return 0.0
-
-        shifted = self._cumulative_reward - min_possible
-        range_val = max_possible - min_possible
-        score = shifted / range_val
-
-        return max(0.0, min(1.0, score))

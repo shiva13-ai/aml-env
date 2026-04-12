@@ -1,178 +1,198 @@
 """
-AML Compliance Officer — Inference Script
-[START] / [STEP] / [END] mandatory format
+Baseline inference script — runs all 4 tasks using an LLM.
+
+Usage:
+    export HF_TOKEN=your_token_here
+    export MODEL_NAME=Qwen/Qwen2.5-72B-Instruct        # optional
+    export API_BASE_URL=https://router.huggingface.co/v1 # optional
+    export ENV_BASE_URL=http://localhost:7860             # optional
+    python inference.py
 """
 import asyncio
-import os
-import textwrap
 import json
-from typing import List
+import os
+import re
+from typing import Any
 
 import httpx
-from openai import OpenAI
+from openai import AsyncOpenAI
 
-API_KEY       = os.getenv("GROQ_API_KEY") or os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-API_BASE_URL  = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
-MODEL_NAME    = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
-ENV_BASE_URL  = os.getenv("ENV_BASE_URL", "http://localhost:7860")
-BENCHMARK     = "aml-env"
-MAX_STEPS     = 20
-SUCCESS_SCORE_THRESHOLD = 0.5
-TASKS         = ["triage_basic", "triage_network", "triage_adversarial"]
+# ── Config 
 
-SYSTEM_PROMPT = textwrap.dedent("""
-You are a senior AML Compliance Officer at a major bank.
-You review flagged transactions one at a time and make ONE decision per transaction:
-  - block: Freeze funds immediately (clear money laundering / sanctions violation)
-  - investigate: Flag for enhanced due diligence (suspicious but not certain)
-  - clear: Mark as legitimate (evidence supports normal business activity)
+HF_TOKEN     = os.environ.get("HF_TOKEN", "")
+MODEL_NAME   = os.environ.get("MODEL_NAME", "llama-3.1-8b-instant")
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
+ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "http://localhost:7860")
 
-You have a limited investigation budget per episode — use it wisely.
+TASKS = ["triage_basic", "triage_network", "triage_adversarial", "triage_chain"]
 
-Respond ONLY with valid JSON and nothing else, no markdown, no explanation:
-{"decision": "block|investigate|clear", "reasoning": "one sentence explanation"}
-""").strip()
+# ── System prompt
+
+SYSTEM_PROMPT = """You are a senior AML (Anti-Money Laundering) Compliance Officer at a global bank with 20 years of experience detecting financial crime.
+
+You are reviewing a batch of flagged transactions. For each transaction, you must decide:
+- **block**: Freeze funds immediately. Use when there is strong, clear evidence (OFAC sanctions, PEP + shell company, confirmed crypto mixer, placement stage with no plausible explanation).
+- **investigate**: Flag for deeper review. Use when suspicious but not conclusive (anomalous pattern, high-risk country without other flags, structuring indicator needing verification).
+- **clear**: Mark as legitimate. Only when you are genuinely confident the transaction is not suspicious.
+
+CRITICAL ANALYSIS RULES:
+1. Cross-transaction patterns matter. The same sender sending multiple sub-threshold amounts on the same day = structuring. Flag ALL of them.
+2. Follow the money chain. If entity A sends to B and B immediately forwards the same amount to a high-risk country, that is layering — flag EVERY link in the chain, not just the most obvious one.
+3. Legitimate transactions exist. Do NOT flag payroll, documented invoices, utility bills, or tuition payments. False positives reduce your score.
+4. Reasoning earns bonus points. For suspicious transactions, use specific terminology: structuring, smurfing, layering, integration, shell company, PEP, sanctions evasion, mirror trade, trade-based money laundering, crypto mixer, placement.
+5. Manage your budget. Prefer block over investigate for high-confidence suspicious transactions — it scores higher and saves budget.
+
+OUTPUT: Respond ONLY with a valid JSON object. No markdown, no explanation outside the JSON:
+{
+  "decisions": [
+    {"transaction_id": "TXN001", "decision": "block", "reasoning": "Structuring: cash deposits just below $10k CTR threshold on consecutive days."},
+    {"transaction_id": "TXN002", "decision": "clear", "reasoning": ""}
+  ]
+}
+
+Include EVERY transaction_id from the observation. Do not skip any.
+"""
 
 
-def log_start(task, model):
-    print(f"[START] task={task} env={BENCHMARK} model={model}", flush=True)
+# ── LLM call 
 
-
-def log_step(step, action, reward, done, error=None):
-    print(
-        f"[STEP] step={step} action={action} reward={reward:.2f} "
-        f"done={str(done).lower()} error={error if error else 'null'}",
-        flush=True,
+async def call_llm(user_message: str) -> str:
+    client = AsyncOpenAI(api_key=HF_TOKEN, base_url=API_BASE_URL)
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        temperature=0.1,
+        max_tokens=3000,
     )
+    return response.choices[0].message.content
 
 
-def log_end(success, steps, score, rewards):
-    print(
-        f"[END] success={str(success).lower()} steps={steps} "
-        f"score={score:.3f} rewards={','.join(f'{r:.2f}' for r in rewards)}",
-        flush=True,
-    )
+def parse_action(raw: str) -> dict[str, Any]:
+    clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+    match = re.search(r"\{.*\}", clean, re.DOTALL)
+    if not match:
+        raise ValueError(f"No JSON found in model output:\n{raw}")
+    return json.loads(match.group())
 
 
-def build_prompt(obs: dict) -> str:
-    return textwrap.dedent(f"""
-    Transaction ID: {obs.get('transaction_id')}
-    Amount: ${obs.get('amount', 0):,.2f}
-    Type: {obs.get('transaction_type')}
-    Sender: {obs.get('sender_country')} -> Receiver: {obs.get('receiver_country')}
-    Velocity (24h): {obs.get('velocity_24h')} transactions
-    Round number: {obs.get('is_round_number')}
-    Prior flags: {obs.get('prior_flags')}
-    Amount vs avg: {obs.get('amount_vs_avg_ratio', 1.0):.1f}x
-    High-risk country: {obs.get('high_risk_country')}
-    Structuring indicator: {obs.get('structuring_indicator')}
-    Shell company: {obs.get('shell_company_indicator')}
-    PEP involved: {obs.get('pep_involved')}
-    Notes: {obs.get('notes', '')}
+def format_observation(obs: dict) -> str:
+    txns = obs["transactions"]
+    budget = obs["investigation_budget"]
+    task = obs["task_name"]
 
-    Budget remaining: {obs.get('investigation_budget', 0) - obs.get('investigations_used', 0)} investigations left
-    Progress: {obs.get('step_number')}/{obs.get('total_transactions')} transactions
-    """).strip()
-
-
-def get_decision(client: OpenAI, obs: dict) -> dict:
-    try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": build_prompt(obs)},
-            ],
-            temperature=0.3,
-            max_tokens=200,
-        )
-        text = (completion.choices[0].message.content or "").strip()
-        text = text.replace("```json", "").replace("```", "").strip()
-        parsed = json.loads(text)
-        if parsed.get("decision") not in ("block", "investigate", "clear"):
-            parsed["decision"] = "investigate"
-        return parsed
-    except Exception as e:
-        print(f"[DEBUG] Model error: {e}", flush=True)
-        return {"decision": "investigate", "reasoning": "fallback"}
+    lines = [
+        f"TASK: {task}",
+        f"INVESTIGATION BUDGET: {budget} (max {budget} 'investigate' decisions allowed)",
+        f"TRANSACTIONS TO REVIEW ({len(txns)} total):",
+        "",
+    ]
+    for txn in txns:
+        lines += [
+            f"--- Transaction {txn['id']} ---",
+            f"  Amount:            ${txn['amount']:,.2f}",
+            f"  Type:              {txn['transaction_type']}",
+            f"  Sender Country:    {txn['sender_country']}  |  Receiver Country: {txn['receiver_country']}",
+            f"  Velocity (24h):    {txn['velocity_24h']} transactions by sender",
+            f"  Amount vs Avg:     {txn['amount_vs_avg_ratio']:.1f}x account historical average",
+            f"  Prior AML Flags:   {txn['prior_flags']}",
+            f"  Risk Signals:",
+            f"    High-risk country:     {txn['high_risk_country']}",
+            f"    Round number:          {txn['is_round_number']}",
+            f"    Structuring indicator: {txn['structuring_indicator']}",
+            f"    Shell company:         {txn['shell_company_indicator']}",
+            f"    PEP involved:          {txn['pep_involved']}",
+            f"  Analyst Notes: {txn['notes']}",
+            "",
+        ]
+    return "\n".join(lines)
 
 
-async def run_task(client: OpenAI, http: httpx.AsyncClient, task_name: str):
-    rewards: List[float] = []
-    steps_taken = 0
-    score = 0.0
-    success = False
+# ── Task runner 
 
-    log_start(task=task_name, model=MODEL_NAME)
+async def run_task(client: httpx.AsyncClient, task_name: str) -> float:
+    print(f"\n{'='*60}")
+    print(f"  TASK: {task_name}")
+    print(f"{'='*60}")
+
+    r = await client.post("/reset", json={"task_name": task_name})
+    r.raise_for_status()
+    obs = r.json()
+    await asyncio.sleep(0.5)
+    print(f"  Transactions: {len(obs['transactions'])}  |  Budget: {obs['investigation_budget']}")
+
+    print(f"  Calling {MODEL_NAME}...")
+    raw = await call_llm(format_observation(obs))
 
     try:
-        # Reset
-        r = await http.post("/reset", json={"task_name": task_name})
+        action = parse_action(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"  ❌ Parse failed: {e}\n  Raw: {raw[:300]}")
+        return 0.0
 
-        if r.status_code != 200:
-            raise Exception(f"Server /reset returned {r.status_code}: {r.text}")
+    r = await client.post("/step", json=action)
+    if r.status_code != 200:
+        print(f"  ❌ /step error {r.status_code}: {r.text}")
+        return 0.0
 
-        data = r.json()
-        obs = data.get("observation", data)
-        state = data.get("state", {})
+    result = r.json()
+    reward = result["reward"]
+    info   = result["info"]
 
-        for step in range(1, MAX_STEPS + 1):
-            if data.get("done", False):
-                break
+    print(f"\n  Score:            {reward:.4f}")
+    print(f"  Raw:              {info['raw_score']:.1f} / {info['max_possible_raw']:.1f}")
+    print(f"  Reasoning bonus:  +{info['reasoning_bonus']:.4f}")
+    if info.get("chain_bonus", 0) > 0:
+        print(f"  Chain bonus:      +{info['chain_bonus']:.4f}")
+    print(f"  Budget penalty:   -{info['budget_penalty']:.4f}")
+    print(f"  Investigate used: {info['investigate_count']} / {info['investigation_budget']}")
 
-            parsed = get_decision(client, obs)
-            decision = parsed.get("decision", "investigate")
-            reasoning = parsed.get("reasoning", "")
+    if info.get("missed_suspicious_transactions"):
+        print(f"  ⚠  Missed: {info['missed_suspicious_transactions']}")
 
-            action = {
-                "transaction_id": obs.get("transaction_id", ""),
-                "decision": decision,
-                "reasoning": reasoning,
-            }
+    print(f"\n  Decision breakdown:")
+    for d in info["decision_breakdown"]:
+        mark  = "✅" if d["correct"] else "❌"
+        bonus = f"  (+{d['reasoning_bonus']:.2f})" if d["reasoning_bonus"] > 0 else ""
+        print(f"    {mark} {d['transaction_id']}: {d['decision']} "
+              f"(true={d['true_label']}, pts={d['points_earned']:+.1f}){bonus}")
 
-            # openenv server requires action wrapped in {"action": ...} along with the state
-            r = await http.post("/step", json={"action": action, "state": state})
-
-            if r.status_code != 200:
-                raise Exception(f"Server /step returned {r.status_code}: {r.text}")
-
-            data = r.json()
-            obs = data.get("observation", data)
-            reward = float(data.get("reward", 0.0))
-            done = bool(data.get("done", False))
-            info = data.get("info", {})
-            state = data.get("state", state)
-
-            rewards.append(reward)
-            steps_taken = step
-            action_str = f"{decision}({action['transaction_id']})"
-            log_step(step=step, action=action_str, reward=reward, done=done)
-
-            if done:
-                score = float(info.get("final_score", 0.0))
-                break
-
-        if score == 0.0 and rewards:
-            score = max(0.0, min(1.0, sum(x for x in rewards if x > 0) / (len(rewards) * 3.0)))
-
-        success = score >= SUCCESS_SCORE_THRESHOLD
-
-    except Exception as e:
-        print(f"[DEBUG] Task '{task_name}' error: {e}", flush=True)
-
-    finally:
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
-
-    return score
+    return reward
 
 
 async def main():
-    llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    if not HF_TOKEN:
+        print("⚠  HF_TOKEN not set — export HF_TOKEN=your_token_here")
 
-    async with httpx.AsyncClient(base_url=ENV_BASE_URL, timeout=30.0) as http:
+    print(f"\nAML Compliance Officer — Baseline Inference")
+    print(f"Model : {MODEL_NAME}")
+    print(f"API   : {API_BASE_URL}")
+    print(f"Env   : {ENV_BASE_URL}")
+
+    scores: dict[str, float] = {}
+
+    async with httpx.AsyncClient(base_url=ENV_BASE_URL, timeout=120.0) as client:
+        r = await client.get("/health")
+        r.raise_for_status()
+        print(f"\nHealth: {r.json()}")
+
         for task in TASKS:
-            await run_task(llm_client, http, task)
-            await asyncio.sleep(1)
+            try:
+                scores[task] = await run_task(client, task)
+            except Exception as e:
+                print(f"  ❌ {task} failed: {e}")
+                scores[task] = 0.0
+
+    print(f"\n{'='*60}")
+    print("  FINAL SCORES")
+    print(f"{'='*60}")
+    for task, score in scores.items():
+        bar = "█" * int(score * 20)
+        print(f"  {task:<25} {score:.4f}  {bar}")
+    avg = sum(scores.values()) / len(scores) if scores else 0
+    print(f"\n  Overall average:  {avg:.4f}")
 
 
 if __name__ == "__main__":
