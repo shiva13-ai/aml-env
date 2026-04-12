@@ -17,7 +17,7 @@ tags:
 
 > **OpenEnv-compatible Anti-Money Laundering environment for training and evaluating AI compliance agents.**
 
-An AI agent plays the role of a bank **Compliance Officer** reviewing flagged transactions one at a time. For each transaction, the agent must decide: **`block`** (freeze funds), **`investigate`** (flag for review), or **`clear`** (mark as legitimate) — maximizing detection accuracy while staying within an investigation budget.
+An AI agent plays the role of a bank **Compliance Officer** reviewing a batch of flagged transactions. For each transaction, the agent must decide: **`block`** (freeze funds), **`investigate`** (flag for review), or **`clear`** (mark as legitimate) — maximizing detection accuracy while staying within an investigation budget.
 
 ---
 
@@ -32,8 +32,8 @@ Money laundering costs the global economy **$800B–$2T per year** (UNODC). Bank
 | Property | Value |
 |---|---|
 | **Domain** | Financial Crime / Regulatory Compliance |
-| **Task type** | Sequential transaction classification with budget constraint |
-| **Episode structure** | Multi-turn (one decision per step) |
+| **Task type** | Batch transaction classification with budget constraint |
+| **Episode structure** | Single-step batch (all decisions submitted at once) |
 | **Action space** | Discrete: `block` / `investigate` / `clear` per transaction |
 | **Observation** | 13 risk features per transaction + free-text analyst notes |
 | **Reward** | Continuous [0, 1] — partial credit for partial detection |
@@ -44,18 +44,21 @@ Money laundering costs the global economy **$800B–$2T per year** (UNODC). Bank
 
 ```python
 class AMLAction(Action):
-    transaction_id: str        # which transaction to decide on
+    decisions: list[AMLDecision]   # one entry per transaction
+
+class AMLDecision:
+    transaction_id: str            # which transaction to decide on
     decision: Literal["block", "investigate", "clear"]
-    reasoning: str             # optional — earns a small reward bonus
+    reasoning: str                 # optional — earns a small reward bonus
 ```
 
 ## 👁️ Observation Space
 
-Each step exposes one transaction with these features:
+Each episode exposes all transactions at once with these features per transaction:
 
 | Feature | Type | Description |
 |---|---|---|
-| `transaction_id` | str | Transaction identifier |
+| `id` | str | Transaction identifier |
 | `amount` | float | USD amount |
 | `sender_country` / `receiver_country` | str | ISO-2 country codes |
 | `transaction_type` | str | wire / cash / crypto / internal |
@@ -68,10 +71,7 @@ Each step exposes one transaction with these features:
 | `shell_company_indicator` | bool | Counterparty flagged as possible shell |
 | `pep_involved` | bool | Politically Exposed Person |
 | `notes` | str | Analyst free-text context |
-| `step_number` | int | Current step in episode |
-| `total_transactions` | int | Total transactions to review |
-| `investigation_budget` | int | Max investigations allowed |
-| `investigations_used` | int | Investigations used so far |
+| `investigation_budget` | int | Max `investigate` decisions allowed for the batch |
 
 ---
 
@@ -85,7 +85,7 @@ Each step exposes one transaction with these features:
 
 ### Task 2: `triage_network` — Medium
 - **10 transactions** forming a structuring → layering → integration network
-- Requires correlating multiple transactions (same sender/receiver)
+- Requires correlating multiple transactions across the same sender/receiver
 - Investigation budget: **3**
 - Expected baseline score: ~0.65
 
@@ -101,6 +101,13 @@ Each step exposes one transaction with these features:
 - Investigation budget: **4**
 - Expected baseline score: ~0.45
 
+### Task 4: `triage_chain` — Hard (Chain Detection)
+- **10 transactions** forming interconnected money-laundering chains
+- Bonus reward for identifying complete chains (e.g. CHN001→CHN003→CHN005)
+- Requires end-to-end chain detection across two waves of transactions
+- Investigation budget: **4**
+- Expected baseline score: ~0.85
+
 ---
 
 ## 🏆 Reward Function
@@ -108,15 +115,22 @@ Each step exposes one transaction with these features:
 ```
 score = normalized_cumulative_reward  ∈ [0, 1]
 
-Per-step raw reward:
+Per-decision raw reward:
   +3.0  correct BLOCK of suspicious transaction
   +2.0  correct INVESTIGATE of suspicious transaction
   +1.0  correct CLEAR of legitimate transaction
   -2.0  FALSE NEGATIVE (suspicious transaction cleared)
   -1.0  FALSE POSITIVE (legit transaction blocked or investigated)
-  +0.2  reasoning bonus per suspicious txn with quality explanation
 
-Final score = (cumulative - min_possible) / (max_possible - min_possible)
+Bonuses & Penalties:
+  +0.02  per suspicious transaction with quality reasoning keywords
+  +0.10  reasoning bonus cap (across all decisions in episode)
+  +0.08  per fully identified chain (triage_chain only), up to +0.16 total
+  -0.50  per investigation over budget
+
+Final score = (raw_score - budget_penalty) / max_possible_raw
+            + reasoning_bonus + chain_bonus
+            clamped to [0.0001, 0.9999]
 ```
 
 The reward provides **continuous partial-progress signal** — not just binary success/failure.
@@ -127,7 +141,7 @@ The reward provides **continuous partial-progress signal** — not just binary s
 
 ### Prerequisites
 ```bash
-pip install openenv-core fastapi uvicorn pydantic
+pip install openenv-core fastapi uvicorn pydantic httpx openai
 ```
 
 ### Local Development
@@ -152,10 +166,10 @@ curl -X POST http://localhost:7860/reset \
   -H "Content-Type: application/json" \
   -d "{\"task_name\": \"triage_basic\"}"
 
-# Step with a decision
+# Submit batch decisions
 curl -X POST http://localhost:7860/step \
   -H "Content-Type: application/json" \
-  -d "{\"transaction_id\": \"TXN001\", \"decision\": \"investigate\", \"reasoning\": \"structuring pattern\"}"
+  -d "{\"decisions\": [{\"transaction_id\": \"TXN001\", \"decision\": \"investigate\", \"reasoning\": \"structuring pattern\"}, {\"transaction_id\": \"TXN002\", \"decision\": \"clear\", \"reasoning\": \"\"}]}"
 ```
 
 ### Docker
@@ -174,11 +188,16 @@ curl http://localhost:7860/health
 ### Run Inference Script
 
 ```bash
-# Set environment variables
+# Set environment variables (Groq — default)
+set HF_TOKEN=your_groq_api_key
+set MODEL_NAME=llama-3.3-70b-versatile
+set API_BASE_URL=https://api.groq.com/openai/v1
+set ENV_BASE_URL=http://localhost:7860
+
+# Or use HuggingFace Inference Router
 set HF_TOKEN=your_huggingface_token
 set MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
 set API_BASE_URL=https://router.huggingface.co/v1
-set ENV_BASE_URL=http://localhost:7860
 
 # Run inference
 python inference.py
@@ -188,13 +207,17 @@ python inference.py
 
 ## 📊 Baseline Scores
 
-Run with `Qwen/Qwen2.5-72B-Instruct` via HuggingFace Inference Router:
+Run with `llama-3.3-70b-versatile` via Groq API:
 
-| Task | Score | Notes |
-|---|---|---|
-| `triage_basic` | ~0.85 | Model handles clear single signals well |
-| `triage_network` | ~0.65 | Network patterns sometimes missed |
-| `triage_adversarial` | ~0.45 | Hard cases challenge even frontier models |
+| Task | Score | Raw Score | Notes |
+|---|---|---|---|
+| `triage_basic` | **0.9691** | 10.0 / 11.0 | Handles clear single signals well |
+| `triage_network` | **0.9636** | 19.0 / 22.0 | Full budget used efficiently |
+| `triage_adversarial` | **0.7216** | 23.0 / 37.0 | TBML / mirror trades can fool the model |
+| `triage_chain` | **0.9999** | 19.0 / 22.0 | Both chains fully identified (+0.16 chain bonus) |
+| **Overall average** | **0.9135** | — | — |
+
+> Scores above reflect actual inference runs. `triage_adversarial` is the primary challenge — ADV001/ADV002 (subtle smurfing) were the only missed suspicious transactions.
 
 ---
 
@@ -203,11 +226,11 @@ Run with `Qwen/Qwen2.5-72B-Instruct` via HuggingFace Inference Router:
 ```
 aml-env/
 ├── models.py                ← Pydantic Action + Observation models
-├── client.py                ← AMLEnv client (extends EnvClient)
+├── client.py                ← AMLEnvClient (async HTTP client)
 ├── __init__.py              ← Package exports
 ├── openenv.yaml             ← OpenEnv spec metadata
 ├── pyproject.toml           ← Package config
-├── inference.py             ← Mandatory baseline inference script (ROOT)
+├── inference.py             ← Baseline inference script (ROOT)
 ├── README.md                ← This file
 └── server/
     ├── app.py               ← FastAPI app (create_fastapi_app)
@@ -225,8 +248,9 @@ aml-env/
 | Endpoint | Method | Description |
 |---|---|---|
 | `/reset` | POST | Start new episode. Body: `{"task_name": "triage_basic"}` |
-| `/step` | POST | Submit one decision. Body: `AMLAction` JSON |
+| `/step` | POST | Submit all decisions. Body: `{"decisions": [...]}` |
 | `/state` | GET | Get current environment state |
+| `/tasks` | GET | List all available tasks |
 | `/health` | GET | Health check — returns `{"status": "ok"}` |
 
 ---
@@ -235,9 +259,9 @@ aml-env/
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `HF_TOKEN` | Yes (inference) | — | HuggingFace API key |
-| `API_BASE_URL` | No | `https://router.huggingface.co/v1` | LLM API endpoint |
-| `MODEL_NAME` | No | `Qwen/Qwen2.5-72B-Instruct` | Model identifier |
+| `HF_TOKEN` | Yes (inference) | — | Groq or HuggingFace API key |
+| `API_BASE_URL` | No | `https://api.groq.com/openai/v1` | LLM API endpoint |
+| `MODEL_NAME` | No | `llama-3.3-70b-versatile` | Model identifier |
 | `ENV_BASE_URL` | No | `http://localhost:7860` | AML env server URL |
 
 ---
