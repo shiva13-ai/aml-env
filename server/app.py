@@ -103,3 +103,11 @@ async def get_state():
         return env.get_state()
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+def main():
+    """Entry point required by openenv validation."""
+    import uvicorn
+    uvicorn.run("server.app:app", host="0.0.0.0", port=7860)
+
+if __name__ == "__main__":
+    main()

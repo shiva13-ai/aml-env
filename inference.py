@@ -20,7 +20,7 @@ from openai import AsyncOpenAI
 # ── Config 
 
 HF_TOKEN     = os.environ.get("HF_TOKEN", "")
-MODEL_NAME   = os.environ.get("MODEL_NAME", "llama-3.1-70b-versatile")
+MODEL_NAME   = os.environ.get("MODEL_NAME", "llama-3.3-70b-versatile")
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
 ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "http://localhost:7860")
 
@@ -119,6 +119,7 @@ async def run_task(client: httpx.AsyncClient, task_name: str) -> float:
     r = await client.post("/reset", json={"task_name": task_name})
     r.raise_for_status()
     obs = r.json()
+    print("START")
     await asyncio.sleep(0.5)
     print(f"  Transactions: {len(obs['transactions'])}  |  Budget: {obs['investigation_budget']}")
 
@@ -137,6 +138,7 @@ async def run_task(client: httpx.AsyncClient, task_name: str) -> float:
         return 0.0
 
     result = r.json()
+    print("STEP")
     reward = result["reward"]
     info   = result["info"]
 
@@ -157,7 +159,7 @@ async def run_task(client: httpx.AsyncClient, task_name: str) -> float:
         bonus = f"  (+{d['reasoning_bonus']:.2f})" if d["reasoning_bonus"] > 0 else ""
         print(f"    {mark} {d['transaction_id']}: {d['decision']} "
               f"(true={d['true_label']}, pts={d['points_earned']:+.1f}){bonus}")
-
+    print("END")
     return reward
 
 

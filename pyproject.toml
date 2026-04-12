@@ -11,11 +11,16 @@ dependencies = [
     "openenv-core>=0.2.1",
     "pydantic>=2.0.0",
     "httpx>=0.24.0",
+    "fastapi",
+    "uvicorn"
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio"]
 
+[project.scripts]
+server = "server.app:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["aml_env*"]
+include = ["server*"]
