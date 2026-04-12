@@ -1,8 +1,8 @@
-import uvicorn
-from aml_env.server import app
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
 
-def main():
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+from openenv.core.env_server import create_fastapi_app
+from models import AMLAction, AMLObservation
+from aml_environment import AMLEnvironment
 
-if __name__ == "__main__":
-    main()
+app = create_fastapi_app(AMLEnvironment, AMLAction, AMLObservation)

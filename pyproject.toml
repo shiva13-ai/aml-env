@@ -1,24 +1,21 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends.legacy:BuildBackend"
 
 [project]
 name = "aml-env"
-version = "1.0.0"
-description = "Anti-Money Laundering Compliance Officer OpenEnv Environment"
+version = "0.1.0"
+description = "AML Compliance Officer OpenEnv environment"
 requires-python = ">=3.10"
 dependencies = [
-    "fastapi>=0.110.0",
-    "uvicorn[standard]>=0.29.0",
-    "pydantic>=2.6.0",
-    "httpx>=0.27.0",
-    "openai>=1.0.0",
-    "openenv-core>=0.2.0",
+    "openenv-core>=0.2.1",
+    "pydantic>=2.0.0",
+    "httpx>=0.24.0",
 ]
 
-[project.scripts]
-server = "app:main"
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
 
 [tool.setuptools.packages.find]
-where = ["server"]
+where = ["."]
 include = ["aml_env*"]

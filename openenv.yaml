@@ -1,121 +1,62 @@
-name: aml-compliance-env
-version: "1.1.0"
+name: aml-env
+version: "0.1.0"
 description: >
-  Anti-Money Laundering Compliance Officer Environment.
-  The agent acts as a bank compliance officer triaging flagged transactions.
-  It must decide whether to block, investigate, or clear each transaction
-  based on AML risk signals: structuring, sanctions exposure, shell company
-  involvement, network layering patterns, PEP status, and correspondent
-  banking typologies. Covers 4 tasks from basic triage to expert-level
-  correspondent banking de-risking decisions — a genuine daily workflow
-  at major financial institutions worldwide.
-author: shiva13-ai
+  AML Compliance Officer environment. An AI agent reviews flagged bank transactions
+  one-by-one, deciding to block, investigate, or clear each one.
+  Real-world anti-money laundering triage with 3 tasks of increasing difficulty.
+author: tupakula-siva-shankar
 tags:
   - openenv
-  - aml
-  - compliance
   - finance
+  - compliance
+  - aml
   - real-world
-  - multi-task
-  - correspondent-banking
-
 tasks:
   - name: triage_basic
-    difficulty: easy
     description: "5 transactions with clear single-signal AML indicators"
-    n_transactions: 5
-    investigation_budget: 2
-
+    difficulty: easy
   - name: triage_network
+    description: "10 transactions forming a smurfing/layering/integration network"
     difficulty: medium
-    description: "10 transactions forming a structuring/layering network"
-    n_transactions: 10
-    investigation_budget: 3
-
   - name: triage_adversarial
+    description: "15 adversarially-crafted transactions including TBML, mirror trades, crypto mixers"
     difficulty: hard
-    description: "15 adversarially-crafted transactions with hidden patterns"
-    n_transactions: 15
-    investigation_budget: 4
-
-  - name: correspondent_banking
-    difficulty: expert
-    description: >
-      20 transactions through nested correspondent banking relationships
-      across 3 respondent banks. Requires identifying payable-through
-      account abuse, nested correspondents, TBML via cultural goods,
-      hawala round-trips, and sanctions evasion via SOEs.
-    n_transactions: 20
-    investigation_budget: 5
-
-
-  - name: sanctions_screening
-    difficulty: medium-hard
-    description: >
-      12 transactions requiring OFAC SDN / UN / EU sanctions list screening.
-      Includes name disambiguation, general license exceptions, subsidiary
-      liability, and FinCEN advisory matches.
-    n_transactions: 12
-    investigation_budget: 4
-
-  - name: crypto_defi_aml
-    difficulty: expert
-    description: >
-      18 on-chain and off-chain crypto transactions covering DeFi-specific
-      AML typologies: Tornado Cash outputs, Lazarus Group wallets, rug pulls,
-      darknet peel chains, cross-chain bridge hopping, NFT wash trading,
-      ransomware payments, and sanctioned exchange withdrawals.
-    n_transactions: 18
-    investigation_budget: 5
-
 action_space:
-  type: object
-  description: >
-    AMLAction containing a list of TransactionDecision objects.
-    Each decision maps a transaction_id to one of: block | investigate | clear.
-  schema:
-    decisions:
-      type: array
-      items:
-        transaction_id: string
-        decision: enum[block, investigate, clear]
-        reasoning: string (optional, earns bonus reward)
-
+  type: discrete
+  fields:
+    - name: transaction_id
+      type: string
+    - name: decision
+      type: enum
+      values: [block, investigate, clear]
+    - name: reasoning
+      type: string
+      optional: true
 observation_space:
-  type: object
-  description: >
-    AMLObservation containing the list of flagged transactions with
-    15 risk features each, plus task context and investigation budget.
-  features:
-    - amount (float, USD)
-    - sender_country / receiver_country (ISO-2)
-    - transaction_type (wire/cash/crypto/internal)
-    - velocity_24h (int)
-    - is_round_number (bool)
-    - prior_flags (int)
-    - amount_vs_avg_ratio (float)
-    - high_risk_country (bool)
-    - structuring_indicator (bool)
-    - shell_company_indicator (bool)
-    - pep_involved (bool)
-    - notes (free text analyst context)
-
+  fields:
+    - name: transaction_id
+      type: string
+    - name: amount
+      type: float
+    - name: sender_country
+      type: string
+    - name: receiver_country
+      type: string
+    - name: transaction_type
+      type: string
+    - name: high_risk_country
+      type: boolean
+    - name: structuring_indicator
+      type: boolean
+    - name: pep_involved
+      type: boolean
+    - name: notes
+      type: string
 reward:
-  range: (0.001, 0.999)
-  type: float
+  range: [0.0, 1.0]
   description: >
-    Shaped compliance score with partial-progress signal.
-    Correct block: +4, correct investigate: +3, correct clear: +1.
-    Partial credit: investigate on block-labeled: +2.
-    Penalties: false negative: -3, false positive: -1, over-budget: -1/each.
-    Reasoning bonus: +0.03 per suspicious txn with quality reasoning (cap 0.12).
-    Score is strictly between 0.001 and 0.999 (never 0 or 1).
-
-endpoints:
-  reset: POST /reset
-  step: POST /step
-  state: GET /state
-  health: GET /health
-  tasks: GET /tasks
-
-port: 7860
+    Normalized per-episode score. Partial credit: +3 correct block, +2 correct investigate,
+    +1 correct clear, -2 false negative, -1 false positive. Reasoning bonus up to +0.2.
+episode:
+  max_steps: 20
+  multi_turn: true
