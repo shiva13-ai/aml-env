@@ -7,6 +7,7 @@ from openenv.core.env_server.types import State
 from models import AMLAction, AMLObservation
 from data import TASKS
 
+
 @dataclass
 class StepResult:
     observation: object
@@ -22,6 +23,7 @@ class AMLEnvironment(Environment):
     Multi-turn: one step = one transaction decision.
     """
 
+    SUPPORTS_CONCURRENT_SESSIONS = True
     TASK_NAMES = ["triage_basic", "triage_network", "triage_adversarial"]
 
     def __init__(self):
@@ -34,8 +36,9 @@ class AMLEnvironment(Environment):
         self._step_index: int = 0
         self._cumulative_reward: float = 0.0
         self._done: bool = False
+        self.reset()
 
-    def reset(self, task_name: Optional[str] = None) -> AMLObservation:
+    def reset(self, task_name: Optional[str] = None, episode_id: Optional[str] = None, **kwargs) -> AMLObservation:
         """Start a new episode. Optionally select a task."""
         if task_name is None:
             task_name = "triage_basic"
@@ -45,27 +48,32 @@ class AMLEnvironment(Environment):
         task = TASKS[task_name]
         self._task_name = task_name
         self._transactions = task["transactions"]
-        self._ground_truth = task["ground_truth"]  # {txn_id: "suspicious"/"legitimate"}
+        self._ground_truth = task["ground_truth"]
         self._budget = task["investigation_budget"]
         self._decisions = {}
         self._step_index = 0
         self._cumulative_reward = 0.0
         self._done = False
-        self._state = State(episode_id=str(uuid.uuid4()), step_count=0)
+        self._state = State(episode_id=episode_id or str(uuid.uuid4()), step_count=0)
 
         return self._make_observation("Episode started. Review each transaction carefully.")
 
-    def step(self, action: AMLAction) -> StepResult:
+    def step(self, action: AMLAction, **kwargs) -> StepResult:
         """Process one transaction decision."""
-        if self._done:
-            obs = self._make_observation("Episode already finished. Call reset() to start again.")
-            return StepResult(observation=obs, reward=0.0, done=True, info={"error": "episode_done"})
 
-        # Validate transaction_id
+        # ✅ Guard: episode already finished
+        if self._done or self._step_index >= len(self._transactions):
+            obs = self._make_observation("Episode already finished. Call reset() to start again.")
+            return StepResult(
+                observation=obs,
+                reward=0.0,
+                done=True,
+                info={"error": "episode_done"}
+            )
+
+        # Force correct transaction_id to match current step
         current_txn = self._transactions[self._step_index]
-        if action.transaction_id != current_txn["id"]:
-            # Accept anyway but note mismatch
-            action.transaction_id = current_txn["id"]
+        action.transaction_id = current_txn["id"]
 
         # Record decision
         self._decisions[current_txn["id"]] = {
@@ -80,14 +88,12 @@ class AMLEnvironment(Environment):
             reasoning=action.reasoning
         )
         self._cumulative_reward += reward
-
         self._step_index += 1
         self._state.step_count += 1
 
-        # Check if episode done
+        # Check if episode is done
         if self._step_index >= len(self._transactions):
             self._done = True
-            # Normalize cumulative reward to [0, 1]
             final_score = self._normalize_score()
             obs = self._make_observation(
                 f"Episode complete! Final score: {final_score:.3f}",
@@ -104,12 +110,17 @@ class AMLEnvironment(Environment):
                 }
             )
 
-        obs = self._make_observation(f"Decision recorded: {action.decision}. Next transaction below.")
+        obs = self._make_observation(
+            f"Decision recorded: {action.decision}. Next transaction below."
+        )
         return StepResult(
             observation=obs,
             reward=reward,
             done=False,
-            info={"step_reward": reward, "cumulative": self._cumulative_reward}
+            info={
+                "step_reward": reward,
+                "cumulative": self._cumulative_reward
+            }
         )
 
     @property
@@ -119,12 +130,41 @@ class AMLEnvironment(Environment):
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _make_observation(self, message: str = "", override_done: bool = False) -> AMLObservation:
-        """Build observation from current transaction."""
+        """Build observation from current transaction. Safe — never goes out of range."""
+        if not self._transactions:
+            return AMLObservation(
+                transaction_id="N/A",
+                amount=0.0,
+                sender_country="XX",
+                receiver_country="XX",
+                transaction_type="unknown",
+                velocity_24h=0,
+                is_round_number=False,
+                prior_flags=0,
+                amount_vs_avg_ratio=0.0,
+                high_risk_country=False,
+                structuring_indicator=False,
+                shell_company_indicator=False,
+                pep_involved=False,
+                notes="Episode not started.",
+                step_number=0,
+                total_transactions=0,
+                investigation_budget=0,
+                investigations_used=0,
+                cumulative_reward=self._cumulative_reward,
+                task_name=self._task_name,
+                episode_done=self._done or override_done,
+                message=message,
+            )
+
+        # ✅ Clamp index so it never causes IndexError
         idx = min(self._step_index, len(self._transactions) - 1)
         txn = self._transactions[idx]
+
         investigations_used = sum(
             1 for d in self._decisions.values() if d["decision"] == "investigate"
         )
+
         return AMLObservation(
             transaction_id=txn["id"],
             amount=txn["amount"],
@@ -151,7 +191,7 @@ class AMLEnvironment(Environment):
         )
 
     def _score_decision(self, txn_id: str, decision: str, reasoning: str) -> float:
-        """Score a single decision. Returns raw reward (will be normalized at end)."""
+        """Score a single decision. Returns raw reward (normalized at episode end)."""
         truth = self._ground_truth.get(txn_id, "legitimate")
         investigations_used = sum(
             1 for d in self._decisions.values() if d["decision"] == "investigate"
@@ -179,7 +219,7 @@ class AMLEnvironment(Environment):
             else:  # block — false positive
                 reward = -1.0
 
-        # Reasoning bonus (up to +0.2 per suspicious txn)
+        # Reasoning bonus (up to +0.2 per suspicious txn with good explanation)
         if truth == "suspicious" and reasoning and len(reasoning.strip()) > 10:
             reward += 0.2
 
@@ -189,13 +229,17 @@ class AMLEnvironment(Environment):
         """Normalize cumulative reward to [0, 1]."""
         n_suspicious = sum(1 for v in self._ground_truth.values() if v == "suspicious")
         n_legit = len(self._ground_truth) - n_suspicious
-        max_possible = (n_suspicious * 3.2) + (n_legit * 1.0)  # max with reasoning bonus
-        if max_possible <= 0:
-            return 0.0
-        raw = self._cumulative_reward
-        # Shift so minimum is 0
+
+        # Best possible: all suspicious blocked with reasoning, all legit cleared
+        max_possible = (n_suspicious * 3.2) + (n_legit * 1.0)
+        # Worst possible: all suspicious cleared, all legit blocked
         min_possible = (n_suspicious * -2.0) + (n_legit * -1.0)
-        shifted = raw - min_possible
+
+        if max_possible == min_possible:
+            return 0.0
+
+        shifted = self._cumulative_reward - min_possible
         range_val = max_possible - min_possible
-        score = shifted / range_val if range_val > 0 else 0.0
+        score = shifted / range_val
+
         return max(0.0, min(1.0, score))
