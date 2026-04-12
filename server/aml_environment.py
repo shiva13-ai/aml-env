@@ -158,12 +158,12 @@ class AMLEnvironment:
         reasoning_bonus = min(reasoning_bonus, 0.10)
 
         # Normalise to [0, 1]
+        epsilon = 0.0001
         if max_score <= 0:
-            reward = 0.0
+            reward = epsilon
         else:
             reward = (raw_score - budget_penalty) / max_score
             reward = reward + reasoning_bonus + chain_bonus
-            epsilon = 0.0001
             reward = max(epsilon, min(1.0 - epsilon, reward))
 
         self._state.done = True
